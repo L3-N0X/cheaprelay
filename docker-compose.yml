@@ -1,0 +1,20 @@
+services:
+  relay:
+    build: .
+    image: srt-twitch-relay:latest
+    container_name: srt-twitch-relay
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    ports:
+      - "9000:9000/udp" # SRT from the phone
+      - "8080:8080"     # control API + web UI (see README: put HTTPS in front of it)
+    volumes:
+      - ./media:/media  # put your fallback.mp4 here
+    # "docker compose down/stop" ends the stream gracefully; give ffmpeg time for that
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
