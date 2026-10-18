@@ -13,6 +13,11 @@ const (
 	streamTypeHEVC = 0x24
 )
 
+const (
+	codecH264 = "h264"
+	codecHEVC = "hevc"
+)
+
 type gopCache struct {
 	maxBytes int
 
@@ -85,6 +90,18 @@ func (c *gopCache) push(pkt []byte) {
 		return
 	}
 	c.gop = append(c.gop, pkt...)
+}
+
+// videoCodec returns the codec of the video stream announced in the PMT, or ""
+// if no PMT has been seen yet.
+func (c *gopCache) videoCodec() string {
+	switch c.videoType {
+	case streamTypeH264:
+		return codecH264
+	case streamTypeHEVC:
+		return codecHEVC
+	}
+	return ""
 }
 
 // snapshot returns PAT + PMT + GOP as one buffer, or nil if nothing usable.

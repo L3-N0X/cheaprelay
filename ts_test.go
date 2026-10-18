@@ -55,7 +55,7 @@ func checkGOPCache(t *testing.T, dir string, data []byte) {
 			keyframes++
 		}
 	}
-	if c.videoType != streamTypeH264 {
+	if c.videoCodec() != codecH264 {
 		t.Fatalf("video stream not found in PMT (type %#x)", c.videoType)
 	}
 	if keyframes < 3 {
@@ -75,6 +75,36 @@ func checkGOPCache(t *testing.T, dir string, data []byte) {
 		"-i", snapFile, "-map", "0:v", "-f", "null", "-").CombinedOutput()
 	if err != nil {
 		t.Fatalf("snapshot not decodable: %v: %s", err, out)
+	}
+}
+
+// TestHEVCDetection checks that an H.265 stream is recognized, so the relay
+// can refuse to send it to Twitch.
+func TestHEVCDetection(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	src := filepath.Join(t.TempDir(), "in.ts")
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc2=s=320x240:r=30", "-t", "1",
+		"-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=none",
+		"-f", "mpegts", src).CombinedOutput()
+	if err != nil {
+		t.Skipf("ffmpeg without libx265: %v: %s", err, out)
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newGOPCache(gopCacheMaxBytes)
+	for i := 0; i+tsPacketSize <= len(data); i += tsPacketSize {
+		c.push(data[i : i+tsPacketSize])
+	}
+	if got := c.videoCodec(); got != codecHEVC {
+		t.Fatalf("video codec = %q, want %q", got, codecHEVC)
+	}
+	if c.snapshot() == nil {
+		t.Fatal("no HEVC keyframe found")
 	}
 }
 

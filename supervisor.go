@@ -41,6 +41,7 @@ type Supervisor struct {
 	restarts      int
 	lastError     string
 	lastErrorAt   time.Time
+	hevcSession   uint64 // SRT session the H.265 error was last reported for
 
 	statusMu sync.Mutex
 	status   OutputStatus
@@ -151,6 +152,12 @@ func (s *Supervisor) reconcile(now time.Time) {
 		return
 	}
 
+	if in.VideoCodec == codecHEVC && in.SessionID != s.hevcSession {
+		s.hevcSession = in.SessionID
+		s.lastError = "phone sends H.265/HEVC, Twitch only accepts H.264: set the video codec in the phone app to H.264"
+		s.lastErrorAt = now
+	}
+
 	want := s.desiredMode(in, now)
 
 	if s.proc != nil && s.proc.mode == want {
@@ -175,6 +182,9 @@ func (s *Supervisor) reconcile(now time.Time) {
 func (s *Supervisor) desiredMode(in InputState, now time.Time) Mode {
 	switch {
 	case s.forceFallback || !in.Active:
+		return ModeFallback
+	case in.VideoCodec == codecHEVC:
+		// Twitch drops the connection or shows a broken player for H.265.
 		return ModeFallback
 	case s.mode == ModeLive:
 		return ModeLive

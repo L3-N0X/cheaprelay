@@ -27,6 +27,8 @@ which is what a normal ffmpeg/OBS shutdown does).
   broadcast running.
 - **Stopping** (API `stop`, `docker compose stop`, `FALLBACK_MAX_DURATION`)
   ends ffmpeg gracefully, so it unpublishes and Twitch ends the broadcast right away.
+  For the live output this is done by closing ffmpeg's input, because ffmpeg
+  ignores SIGINT while it reads from a pipe.
 
 Measured locally: fallback → live reconnects in ≈0.6 s and live → fallback in
 ≈0.1 s (plus the time it takes to notice the drop, see `INPUT_TIMEOUT`). That's
@@ -110,6 +112,15 @@ docker compose run --rm --user "$(id -u):$(id -g)" --entrypoint make-fallback \
   length). Videos keep their audio, or get silence if they have none.
 - Without a `media/fallback.mp4`, the relay generates a plain dark screen at
   startup and logs a warning, so it works out of the box.
+- Always convert the clip with `make-fallback`, even if it is already an `.mp4`.
+  A raw video (e.g. 4K, high bitrate, no audio) is rejected by Twitch. The relay
+  checks the file at startup and logs `fallback file is not prepared for Twitch`
+  if something is off.
+- If you upload the clip from another machine, upload it as a **file**:
+  `rclone copyto brb.mp4 remote:path/media/brb.mp4` or `scp`. `rclone copy` with
+  a file name as the destination creates a *directory* with that name.
+- The fallback file is read at startup: run `docker compose restart` after
+  replacing it (this ends a running broadcast).
 
 ### 5. Start
 
@@ -134,7 +145,7 @@ Field names differ between apps, but you need:
 | Passphrase | same as `SRT_PASSPHRASE` |
 | Stream ID | empty, or the same as `SRT_STREAM_ID` if you set one |
 | Latency | 2000 ms is a good start on mobile networks (see tuning) |
-| Video codec | **H.264** (Twitch's standard RTMP ingest expects H.264) |
+| Video codec | **H.264**, not H.265/HEVC. Some apps (e.g. Moblin) default to H.265. Twitch rejects it, so the relay stays on the fallback and shows an error |
 | Keyframe interval | **1 s** (2 s max). This affects how fast live comes back |
 | Bitrate | constant, ≤ 6000 kbps for Twitch (4000–6000 is typical) |
 | Audio | AAC, 48 kHz |
@@ -165,7 +176,7 @@ Every action returns the new status.
 | `POST /api/stop` | end the broadcast (graceful unpublish) |
 | `POST /api/fallback/force` | show the fallback even if the phone is fine (manual BRB) |
 | `POST /api/fallback/release` | back to automatic mode |
-| `POST /api/reconnect` | drop and re-establish the Twitch connection |
+| `POST /api/reconnect` | drop and re-open the Twitch connection without ending the broadcast. Only needed if Twitch looks stuck while the relay shows `live` |
 | `GET /healthz` | liveness check, no auth |
 
 ```bash
@@ -195,6 +206,7 @@ Example status:
     "remote_addr": "203.0.113.7:50591",
     "connected_at": "2026-10-13T06:12:48.12Z",
     "last_data_ms_ago": 12,
+    "video_codec": "h264",
     "bitrate_kbps": 5870,
     "rtt_ms": 48,
     "packets_lost": 31,
@@ -250,6 +262,19 @@ All settings are environment variables (in `.env`). Durations use Go syntax:
 
 ## Tuning
 
+- **Stream delay.** The relay itself adds nothing on top of the SRT latency
+  (measured: data reaches Twitch within ~50 ms of leaving the SRT buffer). The
+  delay a viewer sees is roughly phone encoder (~0.3 s) + SRT latency + Twitch
+  (2–4 s in low latency mode, much more in normal mode). For ~4–5 s in total:
+  - Twitch dashboard → Settings → Stream → **Latency mode: Low latency**.
+  - Lower the SRT latency on **both** sides: the higher of `SRT_LATENCY` and the
+    phone's setting is used, so lowering only the phone changes nothing. About
+    4× the RTT shown on the web page is the minimum. 1000 ms works on decent
+    LTE/5G; go back up if you see dropped packets.
+  - Avoid interruptions: every reconnect or switch makes the Twitch player
+    stall, and viewers who were watching stay behind by the stall time. Refresh
+    the player to get back to the live edge. Measure the delay with a clock
+    in front of the camera and a freshly loaded player.
 - **How fast does the fallback appear?** About `SRT latency` + `INPUT_TIMEOUT`
   after the phone loses signal. Lowering `INPUT_TIMEOUT` reacts faster but
   switches on shorter dropouts. Every switch costs a short hiccup, so don't go
@@ -288,6 +313,9 @@ All settings are environment variables (in `.env`). Durations use Go syntax:
 | Log: `rejected SRT connection: wrong stream id` | `SRT_STREAM_ID` doesn't match what the app sends. Unset it to see what the app sends (it's logged) |
 | `last_error` mentions ffmpeg exited, repeating | Wrong stream key, Twitch unreachable, or the fallback file isn't H.264/AAC. Run `docker compose logs` and look at the ffmpeg lines |
 | Live works, but switching back from fallback takes long | Keyframe interval too long. Set 1 s in the app |
+| Live never shows up, Twitch shows the broken NotLikeThis screen, or the live ffmpeg exits with `Broken pipe` / `Connection reset by peer` about 1 s after starting | The phone sends H.265/HEVC. Set the video codec in the app to H.264. The relay now detects this (`video_codec: "hevc"` in the status, error in the log) and stays on the fallback |
+| Log: `fallback path is a directory, not a file` | `media/fallback.mp4` is a folder, usually from `rclone copy`. Delete it and upload with `rclone copyto` or `scp` |
+| Log: `fallback file is not prepared for Twitch` | Convert the clip with `make-fallback` (step 4) |
 | Stream ends during `docker compose down`/restart | Expected: shutting down the relay ends the broadcast gracefully |
 
 ## Development

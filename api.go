@@ -35,6 +35,7 @@ type inputStatus struct {
 	RemoteAddr     string    `json:"remote_addr,omitempty"`
 	ConnectedAt    time.Time `json:"connected_at,omitzero"`
 	LastDataMsAgo  *int64    `json:"last_data_ms_ago"`
+	VideoCodec     string    `json:"video_codec,omitempty"`
 	BitrateKbps    int       `json:"bitrate_kbps"`
 	RTTMs          float64   `json:"rtt_ms"`
 	PacketsLost    uint64    `json:"packets_lost"`
@@ -77,6 +78,7 @@ func (a *API) status() statusResponse {
 		StreamID:      st.StreamID,
 		RemoteAddr:    st.RemoteAddr,
 		ConnectedAt:   st.ConnectedAt,
+		VideoCodec:    st.VideoCodec,
 		BitrateKbps:   st.BitrateKbps,
 		KeyframeCache: st.CacheBytes,
 	}

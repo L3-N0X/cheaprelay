@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -183,7 +185,13 @@ func (p *ffmpegProc) Kill() {
 // broadcast right away.
 func (p *ffmpegProc) Stop(timeout time.Duration) {
 	p.killed.Store(true)
-	_ = p.cmd.Process.Signal(os.Interrupt)
+	if p.pipeW != nil {
+		// ffmpeg ignores SIGINT while it reads from the pipe (it stops muxing
+		// but never exits). End of input makes it finish normally instead.
+		p.closeInput()
+	} else {
+		_ = p.cmd.Process.Signal(os.Interrupt)
+	}
 	select {
 	case <-p.done:
 		p.log.Info("ffmpeg stopped gracefully (stream unpublished)")
@@ -209,15 +217,23 @@ func (p *ffmpegProc) logStderr(r io.Reader) {
 // missing, a plain dark screen with silence is generated so the relay still
 // works out of the box.
 func ensureFallbackFile(cfg Config, log *slog.Logger) (string, error) {
-	if st, err := os.Stat(cfg.FallbackFile); err == nil && !st.IsDir() {
+	out := os.TempDir() + "/default-fallback.mp4"
+	st, err := os.Stat(cfg.FallbackFile)
+	switch {
+	case err == nil && !st.IsDir():
+		checkFallbackFile(cfg, cfg.FallbackFile, log)
 		return cfg.FallbackFile, nil
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	case err == nil:
+		// Typically "rclone copy video.mp4 remote:media/fallback.mp4", which
+		// creates a directory named fallback.mp4 with the video inside.
+		log.Warn("fallback path is a directory, not a file (use \"rclone copyto\" or \"scp\" to upload a single file); generating a plain dark screen instead",
+			"configured", cfg.FallbackFile, "generated", out)
+	case errors.Is(err, os.ErrNotExist):
+		log.Warn("fallback file not found, generating a plain dark screen instead",
+			"configured", cfg.FallbackFile, "generated", out)
+	default:
 		return "", fmt.Errorf("fallback file: %w", err)
 	}
-
-	out := os.TempDir() + "/default-fallback.mp4"
-	log.Warn("fallback file not found, generating a plain dark screen instead",
-		"configured", cfg.FallbackFile, "generated", out)
 
 	cmd := exec.Command(cfg.FFmpegPath, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-f", "lavfi", "-i", "color=c=0x18181b:s=1280x720:r=30",
@@ -231,4 +247,48 @@ func ensureFallbackFile(cfg Config, log *slog.Logger) (string, error) {
 		return "", fmt.Errorf("generate default fallback: %w: %s", err, b)
 	}
 	return out, nil
+}
+
+// checkFallbackFile warns if the fallback clip is likely to be rejected by
+// Twitch. It is streamed with -c copy, so it has to be prepared with
+// make-fallback (H.264 + AAC, at most 1080p).
+func checkFallbackFile(cfg Config, path string, log *slog.Logger) {
+	ffprobe := "ffprobe"
+	if dir := filepath.Dir(cfg.FFmpegPath); dir != "." {
+		ffprobe = filepath.Join(dir, "ffprobe")
+	}
+	b, err := exec.Command(ffprobe, "-v", "error", "-show_entries", "stream=codec_type,codec_name,height",
+		"-of", "csv=p=0", path).Output()
+	if err != nil {
+		log.Warn("could not inspect the fallback file", "path", path, "err", err)
+		return
+	}
+	var video, audio string
+	height := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		f := strings.Split(strings.TrimSpace(line), ",")
+		switch {
+		case len(f) >= 3 && f[1] == "video" && video == "":
+			video = f[0]
+			height, _ = strconv.Atoi(f[2])
+		case len(f) >= 2 && f[1] == "audio" && audio == "":
+			audio = f[0]
+		}
+	}
+	var problems []string
+	if video != "h264" {
+		problems = append(problems, fmt.Sprintf("video codec is %q, Twitch needs h264", video))
+	}
+	if height > 1080 {
+		problems = append(problems, fmt.Sprintf("resolution is %dp, Twitch accepts at most 1080p", height))
+	}
+	if audio == "" {
+		problems = append(problems, "no audio track")
+	} else if audio != "aac" {
+		problems = append(problems, fmt.Sprintf("audio codec is %q, Twitch needs aac", audio))
+	}
+	if len(problems) > 0 {
+		log.Warn("fallback file is not prepared for Twitch, convert it with make-fallback (see README)",
+			"path", path, "problems", strings.Join(problems, "; "))
+	}
 }

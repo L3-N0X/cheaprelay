@@ -38,7 +38,8 @@ type srtSession struct {
 	streamID    string
 	remote      string
 	connectedAt time.Time
-	aligned     bool // payloads are whole TS packets (always true for sane senders)
+	aligned     bool   // payloads are whole TS packets (always true for sane senders)
+	videoCodec  string // from the PMT; "" until known
 }
 
 // InputState is a point-in-time view of the SRT input.
@@ -51,6 +52,7 @@ type InputState struct {
 	ConnectedAt time.Time
 	LastData    time.Time
 	ActiveSince time.Time // start of the current uninterrupted data flow
+	VideoCodec  string    // codecH264, codecHEVC or "" if unknown
 	BitrateKbps int
 	CacheBytes  int
 	conn        srt.Conn
@@ -197,6 +199,15 @@ func (in *Ingest) onData(s *srtSession, b []byte, log *slog.Logger) {
 			for i := 0; i < len(b); i += tsPacketSize {
 				in.cache.push(b[i : i+tsPacketSize])
 			}
+			if c := in.cache.videoCodec(); c != s.videoCodec {
+				s.videoCodec = c
+				if c == codecHEVC {
+					log.Error("phone sends H.265/HEVC video, but Twitch only accepts H.264: " +
+						"set the video codec in the phone app to H.264. Showing the fallback until then")
+				} else {
+					log.Info("video codec detected", "codec", c)
+				}
+			}
 		}
 	}
 
@@ -248,6 +259,7 @@ func (in *Ingest) Snapshot() InputState {
 		st.StreamID = s.streamID
 		st.RemoteAddr = s.remote
 		st.ConnectedAt = s.connectedAt
+		st.VideoCodec = s.videoCodec
 		st.Active = !in.lastData.IsZero() && time.Since(in.lastData) < in.cfg.InputTimeout
 		st.conn = s.conn
 	}

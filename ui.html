@@ -23,6 +23,7 @@
   button.armed { background:var(--bad); border-color:var(--bad); }
   dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin:0; font-size:14px; }
   dt { color:var(--muted); } dd { margin:0; text-align:right; font-variant-numeric:tabular-nums; }
+  .hint { color:var(--muted); font-size:13px; margin:0; }
   .err { color:var(--bad); font-size:13px; word-break:break-word; }
   input { width:100%; font:inherit; padding:10px; border-radius:8px; border:1px solid var(--line);
           background:#111116; color:var(--text); }
@@ -42,8 +43,10 @@
     <button class="primary" id="start">Start stream</button>
     <button class="danger" id="stop">Stop stream</button>
     <button id="brb">Force fallback</button>
-    <button id="reconnect">Reconnect</button>
+    <button id="reconnect">Reconnect to Twitch</button>
   </div>
+  <p class="hint">Reconnect to Twitch drops and re-opens the connection to Twitch without ending the
+    broadcast (viewers see a short freeze). Only needed if Twitch looks stuck while this page shows LIVE.</p>
 
   <div class="card">
     <dl id="input"></dl>
@@ -99,6 +102,7 @@ function render(st) {
 
   const rows = [
     ["Phone", i.connected ? (i.active ? "sending" : "connected, no data") : "not connected"],
+    ["Video codec", { h264: "H.264", hevc: "H.265 (Twitch needs H.264!)" }[i.video_codec] || "–"],
     ["Bitrate", i.bitrate_kbps + " kbps"],
     ["Last data", i.last_data_ms_ago == null ? "never" : i.last_data_ms_ago + " ms ago"],
     ["RTT", i.connected ? i.rtt_ms.toFixed(0) + " ms" : "–"],
