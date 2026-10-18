@@ -36,6 +36,7 @@ type Supervisor struct {
 	mode          Mode
 	modeSince     time.Time
 	failures      int
+	failedMode    Mode // mode of the last failed ffmpeg; retryAt only delays this mode
 	retryAt       time.Time
 	switches      int
 	restarts      int
@@ -137,10 +138,6 @@ func (s *Supervisor) reconcile(now time.Time) {
 		return
 	}
 
-	if s.proc == nil && now.Before(s.retryAt) {
-		return
-	}
-
 	if s.cfg.FallbackMaxDuration > 0 && !s.forceFallback && s.mode == ModeFallback &&
 		!in.Active && now.Sub(s.modeSince) >= s.cfg.FallbackMaxDuration {
 		s.log.Warn("no input for FALLBACK_MAX_DURATION, ending the stream", "after", s.cfg.FallbackMaxDuration)
@@ -159,6 +156,13 @@ func (s *Supervisor) reconcile(now time.Time) {
 	}
 
 	want := s.desiredMode(in, now)
+
+	// The retry delay only holds back the mode that failed. Switching to the
+	// other one (e.g. back to live while the fallback keeps failing) happens
+	// right away.
+	if s.proc == nil && want == s.failedMode && now.Before(s.retryAt) {
+		return
+	}
 
 	if s.proc != nil && s.proc.mode == want {
 		if want == ModeLive && in.Active && in.SessionID != s.procSession {
@@ -203,7 +207,7 @@ func (s *Supervisor) desiredMode(in InputState, now time.Time) Mode {
 func (s *Supervisor) startProc(mode Mode) {
 	p, err := startFFmpeg(s.cfg, mode, s.fallbackFile, s.log)
 	if err != nil {
-		s.fail(fmt.Sprintf("start ffmpeg (%s): %v", mode, err))
+		s.fail(mode, fmt.Sprintf("start ffmpeg (%s): %v", mode, err))
 		return
 	}
 	if mode == ModeLive {
@@ -242,10 +246,14 @@ func (s *Supervisor) handleUnexpectedExit() {
 		s.failures = 0
 	}
 	s.restarts++
-	s.fail(fmt.Sprintf("ffmpeg (%s) exited unexpectedly: %v", p.mode, err))
+	s.fail(p.mode, fmt.Sprintf("ffmpeg (%s) exited unexpectedly: %v", p.mode, err))
 }
 
-func (s *Supervisor) fail(msg string) {
+func (s *Supervisor) fail(mode Mode, msg string) {
+	if mode != s.failedMode {
+		s.failures = 0
+	}
+	s.failedMode = mode
 	s.failures++
 	backoff := min(time.Duration(1<<min(s.failures-1, 5))*500*time.Millisecond, maxRetryBackoff)
 	s.retryAt = time.Now().Add(backoff)
