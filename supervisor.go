@@ -20,7 +20,7 @@ const (
 // All state below "owned by the run loop" is only touched by Run; the API
 // talks to it through do().
 type Supervisor struct {
-	cfg          Config
+	settings     *Settings
 	log          *slog.Logger
 	in           *Ingest
 	fallbackFile string
@@ -43,6 +43,7 @@ type Supervisor struct {
 	lastError     string
 	lastErrorAt   time.Time
 	hevcSession   uint64 // SRT session the H.265 error was last reported for
+	startedAt     time.Time
 
 	statusMu sync.Mutex
 	status   OutputStatus
@@ -55,6 +56,7 @@ type command struct {
 
 type OutputStatus struct {
 	Running        bool      `json:"running"`
+	StartedAt      time.Time `json:"started_at,omitzero"` // when the broadcast was started
 	Mode           Mode      `json:"mode"`
 	ModeSince      time.Time `json:"mode_since"`
 	ForcedFallback bool      `json:"forced_fallback"`
@@ -68,9 +70,9 @@ type OutputStatus struct {
 
 var errShuttingDown = errors.New("relay is shutting down")
 
-func NewSupervisor(cfg Config, in *Ingest, fallbackFile string, log *slog.Logger) *Supervisor {
+func NewSupervisor(settings *Settings, in *Ingest, fallbackFile string, log *slog.Logger) *Supervisor {
 	return &Supervisor{
-		cfg:          cfg,
+		settings:     settings,
 		log:          log.With("component", "supervisor"),
 		in:           in,
 		fallbackFile: fallbackFile,
@@ -84,9 +86,13 @@ func NewSupervisor(cfg Config, in *Ingest, fallbackFile string, log *slog.Logger
 func (s *Supervisor) Run(ctx context.Context) {
 	defer close(s.loopDone)
 
-	if s.cfg.Autostart {
-		s.log.Info("AUTOSTART enabled, starting stream")
-		s.wantRunning = true
+	if cfg := s.settings.Get(); cfg.Autostart {
+		if cfg.StreamKey == "" {
+			s.log.Warn("AUTOSTART is enabled, but no stream key is set: not starting")
+		} else {
+			s.log.Info("AUTOSTART enabled, starting stream")
+			s.wantRunning = true
+		}
 	}
 
 	t := time.NewTicker(tickInterval)
@@ -129,6 +135,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 // desired state.
 func (s *Supervisor) reconcile(now time.Time) {
 	in := s.in.Snapshot()
+	cfg := s.settings.Get()
 
 	if !s.wantRunning {
 		if s.proc != nil {
@@ -138,9 +145,9 @@ func (s *Supervisor) reconcile(now time.Time) {
 		return
 	}
 
-	if s.cfg.FallbackMaxDuration > 0 && !s.forceFallback && s.mode == ModeFallback &&
-		!in.Active && now.Sub(s.modeSince) >= s.cfg.FallbackMaxDuration {
-		s.log.Warn("no input for FALLBACK_MAX_DURATION, ending the stream", "after", s.cfg.FallbackMaxDuration)
+	if cfg.FallbackMaxDuration > 0 && !s.forceFallback && s.mode == ModeFallback &&
+		!in.Active && now.Sub(s.modeSince) >= cfg.FallbackMaxDuration {
+		s.log.Warn("no input for FALLBACK_MAX_DURATION, ending the stream", "after", cfg.FallbackMaxDuration)
 		s.wantRunning = false
 		if s.proc != nil {
 			s.stopProc()
@@ -155,7 +162,7 @@ func (s *Supervisor) reconcile(now time.Time) {
 		s.lastErrorAt = now
 	}
 
-	want := s.desiredMode(in, now)
+	want := s.desiredMode(in, cfg.LiveStableTime, now)
 
 	// The retry delay only holds back the mode that failed. Switching to the
 	// other one (e.g. back to live while the fallback keeps failing) happens
@@ -183,7 +190,7 @@ func (s *Supervisor) reconcile(now time.Time) {
 	s.startProc(want)
 }
 
-func (s *Supervisor) desiredMode(in InputState, now time.Time) Mode {
+func (s *Supervisor) desiredMode(in InputState, stableTime time.Duration, now time.Time) Mode {
 	switch {
 	case s.forceFallback || !in.Active:
 		return ModeFallback
@@ -195,7 +202,7 @@ func (s *Supervisor) desiredMode(in InputState, now time.Time) Mode {
 	case s.proc == nil && s.mode == ModeStopped:
 		// Fresh start with the phone already sending: nothing to interrupt.
 		return ModeLive
-	case now.Sub(in.ActiveSince) >= s.cfg.LiveStableTime:
+	case now.Sub(in.ActiveSince) >= stableTime:
 		// Back from fallback only once the input has been stable for a while,
 		// so a flapping connection doesn't cause a stall every few seconds.
 		return ModeLive
@@ -205,7 +212,7 @@ func (s *Supervisor) desiredMode(in InputState, now time.Time) Mode {
 }
 
 func (s *Supervisor) startProc(mode Mode) {
-	p, err := startFFmpeg(s.cfg, mode, s.fallbackFile, s.log)
+	p, err := startFFmpeg(s.settings.Get(), mode, s.fallbackFile, s.log)
 	if err != nil {
 		s.fail(mode, fmt.Sprintf("start ffmpeg (%s): %v", mode, err))
 		return
@@ -272,8 +279,15 @@ func (s *Supervisor) setMode(m Mode) {
 }
 
 func (s *Supervisor) publish() {
+	switch {
+	case !s.wantRunning:
+		s.startedAt = time.Time{}
+	case s.startedAt.IsZero():
+		s.startedAt = time.Now()
+	}
 	st := OutputStatus{
 		Running:        s.wantRunning,
+		StartedAt:      s.startedAt,
 		Mode:           s.mode,
 		ModeSince:      s.modeSince,
 		ForcedFallback: s.forceFallback,
@@ -316,7 +330,12 @@ func (s *Supervisor) do(ctx context.Context, f func()) error {
 	}
 }
 
+var errNoStreamKey = errors.New("no Twitch stream key set: add it in the settings first")
+
 func (s *Supervisor) Start(ctx context.Context) error {
+	if s.settings.Get().StreamKey == "" {
+		return errNoStreamKey
+	}
 	return s.do(ctx, func() {
 		if !s.wantRunning {
 			s.log.Info("start requested")

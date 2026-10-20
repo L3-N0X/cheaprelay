@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Relay</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23000'/%3E%3Cpath d='M11 8.5v15L23.5 16z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/GeistMono-Variable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/app.css">
+<script>
+  // Apply the theme before the first paint to avoid a flash.
+  try { const t = localStorage.getItem("relayTheme"); if (t) document.documentElement.dataset.theme = t; } catch (_) {}
+</script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15L19.5 12z"/></svg>
+    <span class="brand-name">Relay</span>
+    <span class="brand-sep">/</span>
+    <span class="brand-sub mono">srt → twitch</span>
+  </div>
+  <div class="topbar-right">
+    <span class="conn" id="conn" data-state="pending"><i></i><span id="conn-label">Connecting</span></span>
+    <button class="icon-btn" id="theme" aria-label="Toggle theme" title="Toggle theme"></button>
+    <button class="icon-btn" id="open-settings" aria-label="Settings" title="Settings"></button>
+  </div>
+</header>
+
+<main class="layout">
+  <div class="col col-main">
+    <!-- Preview -->
+    <section class="preview-card card" id="preview-card">
+      <div class="card-head">
+        <div class="card-title"><span>Input preview</span><span class="chip mono" id="pv-res" hidden></span><span class="chip mono" id="pv-codec" hidden></span></div>
+        <div class="card-actions">
+          <span class="muted mono small" id="pv-age"></span>
+          <label class="switch" title="Show snapshots of the incoming stream">
+            <input type="checkbox" id="pv-toggle"><span class="switch-track"><span class="switch-thumb"></span></span>
+            <span class="switch-label">Preview</span>
+          </label>
+        </div>
+      </div>
+      <div class="stage" id="stage" data-state="nosignal">
+        <img id="pv-img" alt="Snapshot of the incoming SRT stream">
+        <div class="stage-empty" id="stage-empty">
+          <span class="stage-icon" data-icon="videoOff"></span>
+          <strong id="stage-title">No signal</strong>
+          <span id="stage-sub">Waiting for the phone to connect</span>
+        </div>
+        <div class="stage-overlay">
+          <span class="tag tag-live" id="pv-tag"><i></i><span>Input</span></span>
+          <button class="icon-btn glass" id="pv-full" aria-label="Fullscreen" title="Fullscreen"></button>
+        </div>
+        <div class="meter" id="meter" hidden title="Audio level (peak over the last keyframe interval)">
+          <span class="meter-label mono">AUDIO</span>
+          <span class="meter-bar"><span class="meter-fill" id="meter-fill"></span><span class="meter-peak" id="meter-peak"></span></span>
+          <span class="meter-val mono" id="meter-val">—</span>
+        </div>
+      </div>
+    </section>
+    <!-- Controls -->
+    <section class="controls card" id="controls">
+      <div class="controls-row">
+        <button class="btn btn-primary btn-lg" id="btn-start"><span data-icon="play"></span><span>Go live</span></button>
+        <button class="btn btn-danger btn-lg hold" id="btn-stop" hidden>
+          <span class="hold-fill"></span>
+          <span data-icon="stop"></span><span class="hold-label">Hold to end stream</span>
+        </button>
+        <div class="segmented" role="group" aria-label="Fallback mode">
+          <button id="seg-auto" aria-pressed="true">Auto</button>
+          <button id="seg-brb" aria-pressed="false"><span data-icon="coffee"></span>BRB</button>
+        </div>
+        <button class="btn btn-ghost btn-lg" id="btn-reconnect" title="Drop and re-open the Twitch connection without ending the broadcast"><span data-icon="refresh"></span><span>Reconnect</span></button>
+      </div>
+      <p class="hint">BRB forces the fallback even when the phone is fine. Reconnect is only needed if Twitch looks stuck while the relay shows live.</p>
+    </section>
+    <!-- Metrics -->
+    <section class="metrics" id="metrics">
+      <div class="metric card" data-metric="bitrate">
+        <div class="metric-head"><span>Bitrate</span><span class="metric-sub mono" id="m-bitrate-sub"></span></div>
+        <div class="metric-val mono"><span id="m-bitrate">—</span><small id="m-bitrate-unit">Mbps</small></div>
+        <svg class="spark" id="s-bitrate" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="metric card" data-metric="rtt">
+        <div class="metric-head"><span>Round trip</span><span class="metric-sub mono" id="m-rtt-sub"></span></div>
+        <div class="metric-val mono"><span id="m-rtt">—</span><small>ms</small></div>
+        <svg class="spark" id="s-rtt" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="metric card" data-metric="loss">
+        <div class="metric-head"><span>Packet loss</span><span class="metric-sub mono" id="m-loss-sub"></span></div>
+        <div class="metric-val mono"><span id="m-loss">—</span><small>pkt/s</small></div>
+        <svg class="spark" id="s-loss" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="metric card" data-metric="data">
+        <div class="metric-head"><span>Last packet</span><span class="metric-sub mono" id="m-data-sub"></span></div>
+        <div class="metric-val mono"><span id="m-data">—</span><small>ms ago</small></div>
+        <svg class="spark" id="s-data" preserveAspectRatio="none"></svg>
+      </div>
+    </section>
+  </div>
+  <div class="col col-side">
+    <!-- Broadcast state -->
+    <section class="hero card" id="hero" data-state="off">
+      <div class="hero-main">
+        <div class="hero-badge"><span class="pulse"></span><span id="hero-label">Off air</span></div>
+        <h1 class="hero-title" id="hero-title">Not streaming</h1>
+        <p class="hero-desc" id="hero-desc">Start the stream to go live on Twitch.</p>
+      </div>
+      <dl class="hero-stats">
+        <div><dt>On air</dt><dd class="mono" id="stat-onair">—</dd></div>
+        <div><dt>In mode</dt><dd class="mono" id="stat-mode">—</dd></div>
+        <div><dt>Switches</dt><dd class="mono" id="stat-switches">0</dd></div>
+        <div><dt>Restarts</dt><dd class="mono" id="stat-restarts">0</dd></div>
+      </dl>
+      <div class="callout" id="error" hidden>
+        <span class="callout-icon" data-icon="alert"></span>
+        <div><strong id="error-title">Last error</strong><p id="error-msg"></p></div>
+      </div>
+    </section>
+    <!-- Phone -->
+    <section class="phone card">
+      <div class="card-head">
+        <div class="card-title"><span data-icon="phone"></span><span>Phone</span></div>
+        <span class="status-pill" id="phone-pill" data-state="off"><i></i><span>Not connected</span></span>
+      </div>
+      <dl class="kv" id="phone-kv"></dl>
+      <div class="connect">
+        <div class="connect-label">Connect URL</div>
+        <div class="copy-field">
+          <code class="mono" id="srt-url">srt://…</code>
+          <button class="icon-btn" id="copy-url" aria-label="Copy URL" title="Copy"></button>
+        </div>
+        <p class="hint" id="srt-hint"></p>
+      </div>
+    </section>
+    <!-- Activity -->
+    <section class="activity card">
+      <div class="card-head">
+        <div class="card-title"><span>Activity</span></div>
+        <div class="segmented small" role="group" aria-label="Filter">
+          <button id="log-all" aria-pressed="true">All</button>
+          <button id="log-warn" aria-pressed="false">Issues</button>
+        </div>
+      </div>
+      <ol class="log" id="log"></ol>
+    </section>
+  </div>
+</main>
+
+<!-- Mobile action bar -->
+<nav class="dock" id="dock">
+  <button class="btn btn-primary" id="dock-start"><span data-icon="play"></span><span>Go live</span></button>
+  <button class="btn btn-danger hold" id="dock-stop" hidden><span class="hold-fill"></span><span data-icon="stop"></span><span class="hold-label">Hold to end</span></button>
+  <button class="btn btn-ghost" id="dock-brb" aria-pressed="false"><span data-icon="coffee"></span><span>BRB</span></button>
+  <button class="btn btn-ghost btn-icon" id="dock-reconnect" aria-label="Reconnect to Twitch" title="Reconnect to Twitch"><span data-icon="refresh"></span></button>
+</nav>
+
+<!-- Settings drawer -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" aria-hidden="true" aria-label="Settings" inert>
+  <div class="drawer-head">
+    <div>
+      <h2>Settings</h2>
+      <p class="muted small" id="settings-sub">Changes here override <span class="mono">.env</span></p>
+    </div>
+    <button class="icon-btn" id="close-settings" aria-label="Close settings"></button>
+  </div>
+  <div class="drawer-body" id="settings-body">
+    <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+  </div>
+  <div class="drawer-foot" id="settings-foot" hidden>
+    <span class="muted small" id="dirty-count"></span>
+    <div class="row-gap">
+      <button class="btn btn-ghost" id="settings-discard">Discard</button>
+      <button class="btn btn-primary" id="settings-save">Save changes</button>
+    </div>
+  </div>
+</aside>
+
+<!-- Token gate -->
+<div class="gate" id="gate" hidden>
+  <form class="gate-card card" id="gate-form">
+    <span class="gate-icon" data-icon="lock"></span>
+    <h2>Unlock relay</h2>
+    <p class="muted">Enter the <span class="mono">API_TOKEN</span> from your <span class="mono">.env</span>. It is stored in this browser only.</p>
+    <input class="input mono" id="gate-token" type="password" autocomplete="current-password" placeholder="API token" required>
+    <p class="field-error" id="gate-error"></p>
+    <button class="btn btn-primary btn-lg" type="submit">Continue</button>
+  </form>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

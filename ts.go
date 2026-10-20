@@ -6,6 +6,8 @@ package main
 // immediately with a keyframe instead of waiting for the phone's next one.
 // That keeps the stall on a fallback -> live switch as short as possible.
 
+import "time"
+
 const tsPacketSize = 188
 
 const (
@@ -25,9 +27,14 @@ type gopCache struct {
 	videoPID  int
 	videoType byte
 
+	hasAudio bool // the PMT announces a stream besides the video
+
 	pat []byte
 	pmt []byte
 	gop []byte // whole TS packets since the last keyframe; nil = no keyframe seen yet
+
+	keyframes  uint64    // number of keyframes seen, identifies the current GOP
+	keyframeAt time.Time // when the current GOP started
 }
 
 func newGOPCache(maxBytes int) *gopCache {
@@ -64,8 +71,9 @@ func (c *gopCache) push(pkt []byte) {
 			}
 		}
 	case pid == c.pmtPID && pusi && hasPayload:
-		if vpid, vtype, ok := parsePMT(pkt[payload:]); ok {
+		if vpid, vtype, streams, ok := parsePMT(pkt[payload:]); ok {
 			c.pmt = append(c.pmt[:0], pkt...)
+			c.hasAudio = streams > 1
 			if vpid != c.videoPID {
 				c.videoPID, c.videoType = vpid, vtype
 				c.gop = nil
@@ -77,6 +85,8 @@ func (c *gopCache) push(pkt []byte) {
 				c.gop = make([]byte, 0, 1<<20)
 			}
 			c.gop = c.gop[:0]
+			c.keyframes++
+			c.keyframeAt = time.Now()
 		}
 	}
 
@@ -131,24 +141,26 @@ func parsePAT(p []byte) int {
 	return -1
 }
 
-// parsePMT returns the PID and stream type of the first video stream.
-func parsePMT(p []byte) (int, byte, bool) {
-	sec, ok := psiSection(p, 0x02)
-	if !ok || len(sec) < 12 {
-		return 0, 0, false
+// parsePMT returns the PID and stream type of the first video stream and the
+// total number of elementary streams.
+func parsePMT(p []byte) (pid int, streamType byte, streams int, ok bool) {
+	sec, found := psiSection(p, 0x02)
+	if !found || len(sec) < 12 {
+		return 0, 0, 0, false
 	}
 	progInfoLen := int(sec[10]&0x0f)<<8 | int(sec[11])
 	end := len(sec) - 4 // CRC
 	for i := 12 + progInfoLen; i+5 <= end; {
 		st := sec[i]
-		pid := int(sec[i+1]&0x1f)<<8 | int(sec[i+2])
+		esPID := int(sec[i+1]&0x1f)<<8 | int(sec[i+2])
 		esInfoLen := int(sec[i+3]&0x0f)<<8 | int(sec[i+4])
-		if st == streamTypeH264 || st == streamTypeHEVC {
-			return pid, st, true
+		streams++
+		if !ok && (st == streamTypeH264 || st == streamTypeHEVC) {
+			pid, streamType, ok = esPID, st, true
 		}
 		i += 5 + esInfoLen
 	}
-	return 0, 0, false
+	return pid, streamType, streams, ok
 }
 
 // psiSection extracts a PSI section (from table_id up to and including the

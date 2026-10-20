@@ -21,8 +21,9 @@ func TestRetryDelayOnlyHoldsFailedMode(t *testing.T) {
 	}
 	cfg := Config{FFmpegPath: fake, FFmpegLogLevel: "error", InputTimeout: time.Second, LiveStableTime: time.Second}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	in := NewIngest(cfg, log)
-	s := NewSupervisor(cfg, in, "fallback.mp4", log)
+	settings := newStaticSettings(cfg)
+	in := NewIngest(settings, log)
+	s := NewSupervisor(settings, in, "fallback.mp4", log)
 	s.wantRunning = true
 	defer func() {
 		if s.proc != nil {

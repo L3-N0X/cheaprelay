@@ -11,6 +11,7 @@ services:
       - "8080:8080"     # control API + web UI (see README: put HTTPS in front of it)
     volumes:
       - ./media:/media  # put your fallback.mp4 here
+      - relay-data:/data # settings changed in the web UI
     # "docker compose down/stop" ends the stream gracefully; give ffmpeg time for that
     stop_grace_period: 15s
     logging:
@@ -18,3 +19,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  relay-data:

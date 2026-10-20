@@ -3,8 +3,9 @@
 Receives an SRT stream (e.g. from your phone), forwards it to Twitch **without
 re-encoding**, and switches to a fallback video ("BRB" screen) when the phone's
 connection drops. When the phone comes back, it switches back to live
-automatically. A small HTTP API + web page lets you start/stop the stream and
-force the fallback.
+automatically. A web dashboard (and HTTP API) lets you start/stop the stream,
+force the fallback, watch a live preview of the phone's stream and change most
+settings without touching `.env`.
 
 Because nothing is re-encoded, it needs almost no CPU (≈1–3% of one core) and
 runs on the cheapest VPS you can find (1 vCPU / 512 MB RAM is plenty).
@@ -157,12 +158,48 @@ Some apps put the passphrase and stream id into the URL instead:
 
 ## Controlling the stream
 
-### Web page
+### Web dashboard
 
-Open `http://<VPS-IP>:8080` on your phone, paste the `API_TOKEN` once (it is
-stored in that browser), and you get the current state plus the
-Start / Stop / Force fallback / Reconnect buttons. Stop requires a second tap,
-because it ends the Twitch broadcast.
+Open `http://<VPS-IP>:8080` on your phone or computer and enter the `API_TOKEN`
+once (it is stored in that browser). Tip: bookmark
+`http://<VPS-IP>:8080/#token=<API_TOKEN>` to log in directly; the token is
+read from the URL fragment, which is never sent to the server.
+
+- **Broadcast state**: live / fallback / BRB / off air, time on air, switches,
+  and the last error.
+- **Input preview**: a snapshot of the phone's stream about once per keyframe
+  (every second with the recommended 1 s keyframe interval), with resolution,
+  fps, codec and an audio level meter. The relay only decodes keyframes, and only
+  while a browser shows the preview, so it costs almost no CPU. Turn it off with
+  the toggle on the card (per browser, saves mobile data) or for everyone with
+  `PREVIEW_ENABLED=false`.
+- **Controls**: Go live, BRB (forced fallback), Reconnect. Ending the stream
+  needs a press-and-hold, because it ends the Twitch broadcast. On phones the
+  controls sit in a bar at the bottom of the screen.
+- **Metrics** with 60 s sparklines: bitrate, round-trip time, packet loss, time
+  since the last packet.
+- **Phone**: connection details and the `srt://` URL to put into the app.
+- **Activity**: the relay's recent log (connections, switches, errors).
+- **Settings** (slider icon, top right): see below.
+
+### Changing settings from the web UI
+
+Most settings can be changed in the dashboard, including the stream key, the
+Twitch ingest server, the SRT passphrase / stream id and all switching timings.
+Each one shows when the change takes effect (immediately, on the next phone
+connection, or on the next Twitch connection; after changing the stream key you
+can reconnect with one tap). Listen addresses, the SRT latency, the fallback
+file and the API token can only be changed in `.env`.
+
+Changes are saved to `SETTINGS_FILE` (`/data/settings.json`, a Docker volume)
+and **override `.env`**, also after a restart. Every overridden setting shows a
+"Reset to .env" link. Secrets (stream key, passphrase) are never sent back to
+the browser, only whether they are set. Without an `API_TOKEN` the stream key,
+ingest server and passphrase can't be changed from the web UI.
+
+Because the stream key can be set in the dashboard, `TWITCH_STREAM_KEY` is
+optional in `.env`: without it the relay starts, and "Go live" asks you to set
+the key first.
 
 ### HTTP API
 
@@ -171,7 +208,11 @@ Every action returns the new status.
 
 | Method & path | Effect |
 |---|---|
-| `GET /api/status` | current state (see below) |
+| `GET /api/status` | current state (see below). `?preview=1` keeps the preview snapshots coming |
+| `GET /api/preview.jpg` | latest preview snapshot (JPEG, `204` if there is none). Supports `ETag` |
+| `GET /api/logs?after=<seq>` | recent log entries after a sequence number |
+| `GET /api/settings` | all settings with their current/.env values (secrets masked) |
+| `PATCH /api/settings` | change settings: `{"INPUT_TIMEOUT": "2s"}`; `null` resets a setting to its `.env` value |
 | `POST /api/start` | go live on Twitch (fallback if the phone isn't sending yet) |
 | `POST /api/stop` | end the broadcast (graceful unpublish) |
 | `POST /api/fallback/force` | show the fallback even if the phone is fine (manual BRB) |
@@ -243,7 +284,7 @@ All settings are environment variables (in `.env`). Durations use Go syntax:
 
 | Variable | Default | Description |
 |---|---|---|
-| `TWITCH_STREAM_KEY` | *(required)* | Your stream key. Append `?bandwidthtest=true` to test without going public |
+| `TWITCH_STREAM_KEY` | *(empty)* | Your stream key, required to go live (can also be set in the web UI). Append `?bandwidthtest=true` to test without going public |
 | `TWITCH_RTMP_URL` | `rtmp://live.twitch.tv/app` | Ingest server, without the key |
 | `API_TOKEN` | *(empty = no auth!)* | Token for the API / web page |
 | `SRT_PASSPHRASE` | *(empty)* | Require SRT encryption with this passphrase (10–79 chars) |
@@ -259,6 +300,8 @@ All settings are environment variables (in `.env`). Durations use Go syntax:
 | `FFMPEG_ANALYZE_DURATION` | `1s` | How much input ffmpeg analyses before connecting to Twitch |
 | `FFMPEG_LOGLEVEL` | `warning` | ffmpeg log level (`error`, `warning`, `info`, `debug`) |
 | `LOG_LEVEL` | `info` | Relay log level |
+| `PREVIEW_ENABLED` | `true` | Allow the input preview in the web UI |
+| `SETTINGS_FILE` | `/data/settings.json` | Where changes made in the web UI are saved. They override this table's values |
 
 ## Tuning
 
@@ -335,5 +378,8 @@ Code overview:
 | `ts.go` | minimal MPEG-TS parsing for the keyframe cache |
 | `ffmpeg.go` | ffmpeg processes: `Kill` (drop connection) vs `Stop` (unpublish) |
 | `supervisor.go` | state machine deciding live / fallback / stopped |
-| `api.go`, `ui.html` | HTTP API and the control page |
+| `settings.go` | settings changed from the web UI, saved to `SETTINGS_FILE` |
+| `preview.go` | keyframe snapshots + audio level for the web UI |
+| `logs.go` | in-memory log buffer for the activity feed |
+| `api.go`, `web/` | HTTP API and the dashboard (plain HTML/CSS/JS, embedded into the binary; Geist font under the OFL) |
 | `scripts/make-fallback.sh` | converts an image/video into a fallback clip |

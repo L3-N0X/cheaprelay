@@ -18,8 +18,8 @@ const gopCacheMaxBytes = 16 << 20
 // time; a new connection replaces the previous one, which is what you want
 // when the phone reconnects before the old connection has timed out.
 type Ingest struct {
-	cfg Config
-	log *slog.Logger
+	settings *Settings
+	log      *slog.Logger
 
 	mu          sync.Mutex
 	sess        *srtSession
@@ -58,21 +58,22 @@ type InputState struct {
 	conn        srt.Conn
 }
 
-func NewIngest(cfg Config, log *slog.Logger) *Ingest {
-	return &Ingest{cfg: cfg, log: log.With("component", "srt")}
+func NewIngest(settings *Settings, log *slog.Logger) *Ingest {
+	return &Ingest{settings: settings, log: log.With("component", "srt")}
 }
 
 func (in *Ingest) Run(ctx context.Context) error {
+	cfg := in.settings.Get()
 	conf := srt.DefaultConfig()
-	conf.ReceiverLatency = in.cfg.SRTLatency
-	conf.PeerLatency = in.cfg.SRTLatency
+	conf.ReceiverLatency = cfg.SRTLatency
+	conf.PeerLatency = cfg.SRTLatency
 
-	ln, err := srt.Listen("srt", in.cfg.SRTListenAddr, conf)
+	ln, err := srt.Listen("srt", cfg.SRTListenAddr, conf)
 	if err != nil {
-		return fmt.Errorf("srt listen on %s: %w", in.cfg.SRTListenAddr, err)
+		return fmt.Errorf("srt listen on %s: %w", cfg.SRTListenAddr, err)
 	}
-	in.log.Info("listening for SRT", "addr", in.cfg.SRTListenAddr,
-		"passphrase", in.cfg.SRTPassphrase != "", "stream_id_required", in.cfg.SRTStreamID != "")
+	in.log.Info("listening for SRT", "addr", cfg.SRTListenAddr,
+		"passphrase", cfg.SRTPassphrase != "", "stream_id_required", cfg.SRTStreamID != "")
 
 	go func() {
 		<-ctx.Done()
@@ -96,19 +97,20 @@ func (in *Ingest) handleRequest(req srt.ConnRequest) {
 	remote := req.RemoteAddr().String()
 	streamID := req.StreamId()
 	log := in.log.With("remote", remote, "stream_id", streamID)
+	cfg := in.settings.Get()
 
-	if want := in.cfg.SRTStreamID; want != "" && subtle.ConstantTimeCompare([]byte(streamID), []byte(want)) != 1 {
+	if want := cfg.SRTStreamID; want != "" && subtle.ConstantTimeCompare([]byte(streamID), []byte(want)) != 1 {
 		log.Warn("rejected SRT connection: wrong stream id")
 		req.Reject(srt.REJX_FORBIDDEN)
 		return
 	}
-	if in.cfg.SRTPassphrase != "" {
+	if cfg.SRTPassphrase != "" {
 		if !req.IsEncrypted() {
 			log.Warn("rejected SRT connection: no passphrase set on the sender")
 			req.Reject(srt.REJ_UNSECURE)
 			return
 		}
-		if err := req.SetPassphrase(in.cfg.SRTPassphrase); err != nil {
+		if err := req.SetPassphrase(cfg.SRTPassphrase); err != nil {
 			log.Warn("rejected SRT connection: wrong passphrase")
 			req.Reject(srt.REJ_BADSECRET)
 			return
@@ -184,7 +186,7 @@ func (in *Ingest) onData(s *srtSession, b []byte, log *slog.Logger) {
 		return
 	}
 
-	if in.activeSince.IsZero() || now.Sub(in.lastData) > in.cfg.InputTimeout {
+	if in.activeSince.IsZero() || now.Sub(in.lastData) > in.settings.Get().InputTimeout {
 		in.activeSince = now
 	}
 	in.lastData = now
@@ -260,10 +262,41 @@ func (in *Ingest) Snapshot() InputState {
 		st.RemoteAddr = s.remote
 		st.ConnectedAt = s.connectedAt
 		st.VideoCodec = s.videoCodec
-		st.Active = !in.lastData.IsZero() && time.Since(in.lastData) < in.cfg.InputTimeout
+		st.Active = !in.lastData.IsZero() && time.Since(in.lastData) < in.settings.Get().InputTimeout
 		st.conn = s.conn
 	}
 	return st
+}
+
+// keyframeSnapshot is the cached stream data since the last keyframe, used
+// for the preview.
+type keyframeSnapshot struct {
+	session  uint64
+	keyframe uint64 // changes with every new keyframe
+	age      time.Duration
+	hasAudio bool
+	data     []byte
+}
+
+// KeyframeSnapshot returns the current keyframe cache, or ok=false if there
+// is no usable keyframe.
+func (in *Ingest) KeyframeSnapshot() (keyframeSnapshot, bool) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if in.sess == nil || in.cache == nil {
+		return keyframeSnapshot{}, false
+	}
+	data := in.cache.snapshot()
+	if data == nil {
+		return keyframeSnapshot{}, false
+	}
+	return keyframeSnapshot{
+		session:  in.sess.id,
+		keyframe: in.cache.keyframes,
+		age:      time.Since(in.cache.keyframeAt),
+		hasAudio: in.cache.hasAudio,
+		data:     data,
+	}, true
 }
 
 func (in *Ingest) bitrateLoop(ctx context.Context) {
