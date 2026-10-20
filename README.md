@@ -441,6 +441,11 @@ go test ./...       # needs ffmpeg in PATH for the MPEG-TS test
 go build .
 ```
 
+CI (`.github/workflows/ci.yml`) runs gofmt, `go vet`, `go test -race`, golangci-lint
+and a multi-arch Docker build on every push and pull request. Pushes to `main` and
+`v*` tags are published to `ghcr.io/l3-n0x/cheaprelay` (`edge`, `<version>`, `sha-…`)
+by `.github/workflows/publish.yml`.
+
 Code overview:
 
 | File | Purpose |
