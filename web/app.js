@@ -27,6 +27,7 @@ const ICONS = {
   expand: '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>',
   reset: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+  layers: '<path d="m12.83 2.18 8.58 3.9a.5.5 0 0 1 0 .92l-8.58 3.9a2 2 0 0 1-1.66 0L2.6 7a.5.5 0 0 1 0-.92l8.58-3.9a2 2 0 0 1 1.66 0Z"/><path d="m2 12 9.17 4.17a2 2 0 0 0 1.66 0L22 12"/><path d="m2 17 9.17 4.17a2 2 0 0 0 1.66 0L22 17"/>',
   key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/>',
 };
 const icon = (name) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
@@ -137,9 +138,11 @@ function broadcastState(o) {
   if (!o.running && o.mode === "stopped") return "off";
   if (o.running && !o.ffmpeg_running) return "reconnecting";
   if (o.mode === "live") return "live";
-  if (o.mode === "fallback") return o.forced_fallback ? "forced" : "fallback";
+  if (o.mode === "fallback") return o.picked_scene ? "scene" : "fallback";
   return "off";
 }
+
+const sceneName = (r, id) => (r.scenes.find((s) => s.id === id) || { name: id }).name;
 
 function render(st) {
   status = st;
@@ -147,8 +150,8 @@ function render(st) {
   const state = broadcastState(o);
 
   // Hero
-  const labels = { off: "Off air", reconnecting: "Reconnecting", live: "Live", fallback: "Fallback", forced: "BRB" };
-  const titles = { off: "Not streaming", reconnecting: "Reconnecting to Twitch", live: "Live on Twitch", fallback: "Showing fallback", forced: "Be right back" };
+  const labels = { off: "Off air", reconnecting: "Reconnecting", live: "Live", fallback: "Fallback", scene: "Scene" };
+  const titles = { off: "Not streaming", reconnecting: "Reconnecting to Twitch", live: "Live on Twitch", fallback: "Showing " + sceneName(r, o.scene), scene: sceneName(r, o.scene) };
   $("hero").dataset.state = state;
   setText("hero-label", labels[state]);
   setText("hero-title", titles[state]);
@@ -176,11 +179,9 @@ function render(st) {
     b.firstElementChild.innerHTML = icon(needsKey ? "key" : "play");
   }
   $("btn-stop").hidden = $("dock-stop").hidden = !o.running;
-  $("seg-auto").setAttribute("aria-pressed", String(!o.forced_fallback));
-  $("seg-brb").setAttribute("aria-pressed", String(o.forced_fallback));
-  $("dock-brb").setAttribute("aria-pressed", String(o.forced_fallback));
   $("btn-reconnect").disabled = $("dock-reconnect").disabled = !o.running;
 
+  renderScenes(o, r);
   renderMetrics(i);
   renderPhone(i, r);
   renderPreview(st);
@@ -191,23 +192,63 @@ function describe(state, o, i, r) {
   switch (state) {
     case "off":
       if (!r.stream_key_set) return "Add your Twitch stream key in the settings to get started.";
+      if (o.picked_scene) return `Going live starts with “${sceneName(r, o.picked_scene)}”. Switch to Auto to show the phone.`;
       return i.active ? "The phone is sending. Go live and it's on air right away." : "Start the stream to go live on Twitch. The fallback is shown until the phone sends.";
     case "reconnecting": return "The connection to Twitch dropped. Retrying automatically…";
     case "live": return "The phone's signal is on air.";
-    case "forced": return "Manual BRB: the fallback is on air even though the phone may be fine.";
+    case "scene": return "Picked by hand: stays on air until you switch back to Auto, even when the phone is fine.";
     case "fallback": {
       if (i.video_codec === "hevc") return "The phone sends H.265. Twitch needs H.264, change the codec in the app.";
       if (i.active && i.active_since) {
         const left = r.live_stable_ms - ago(i.active_since);
         return left > 0 ? `Signal is back. Going live in ${Math.ceil(left / 1000)}s…` : "Signal is back. Going live…";
       }
-      let s = i.connected ? "The phone is connected but sends no data." : "Phone signal lost. Viewers see the fallback.";
+      let s = i.connected ? "The phone is connected but sends no data." : "Phone signal lost. Viewers see the fallback scene.";
       if (r.fallback_max_s > 0) s += ` Stream ends in ${dur(r.fallback_max_s * 1000 - ago(o.mode_since))} if it stays away.`;
       return s;
     }
   }
   return "";
 }
+
+// ---------- Scenes ----------
+let scenesKey = "";
+
+function renderScenes(o, r) {
+  const items = [{ id: "", name: "Auto", sub: "Phone when it sends" }]
+    .concat(r.scenes.map((sc) => ({
+      id: sc.id, name: sc.name, placeholder: sc.placeholder,
+      sub: [sc.id === r.fallback_scene ? "Fallback" : "", sc.placeholder ? "file missing" : ""].filter(Boolean).join(" · ") || "Scene",
+    })));
+  const key = JSON.stringify(items);
+  const grid = $("scene-grid"), sel = $("dock-scene-select");
+  if (key !== scenesKey) {
+    scenesKey = key;
+    grid.replaceChildren(...items.map((it) => h("button", {
+      class: "scene-btn", type: "button", "data-scene": it.id,
+      title: it.placeholder ? "The scene's file is missing, a plain dark screen is shown instead" : null,
+      onclick: (e) => pickScene(it.id, e.currentTarget),
+    },
+      h("span", { class: "scene-name" }, h("i", { class: "scene-dot", title: "On air" }), it.name),
+      h("span", { class: "scene-sub" + (it.placeholder ? " warn" : "") }, it.sub))));
+    sel.replaceChildren(...items.map((it) => h("option", { value: it.id }, it.name)));
+  }
+  for (const b of grid.children) {
+    const id = b.dataset.scene;
+    b.setAttribute("aria-pressed", String(id === (o.picked_scene || "")));
+    b.dataset.onair = String(id === "" ? o.mode === "live" : o.mode === "fallback" && o.scene === id);
+  }
+  sel.value = o.picked_scene || "";
+  $("dock-scene").dataset.picked = String(!!o.picked_scene);
+  setText("dock-scene-label", o.picked_scene ? sceneName(r, o.picked_scene) : "Auto");
+  setText("scene-hint", o.picked_scene && !o.running ? "Going live starts with this scene" : "");
+}
+
+function pickScene(id, btn) {
+  if (!status || (status.output.picked_scene || "") === id) return;
+  act("/api/scene", btn, null, { scene: id });
+}
+$("dock-scene-select").addEventListener("change", (e) => pickScene(e.target.value, $("dock-scene")));
 
 function push(arr, v) { arr.push(v); if (arr.length > HISTORY) arr.shift(); }
 
@@ -437,10 +478,10 @@ for (const [id, f] of [["log-all", "all"], ["log-warn", "warn"]]) {
 }
 
 // ---------- Actions ----------
-async function act(path, btn, okMsg) {
+async function act(path, btn, okMsg, body) {
   btn && btn.classList.add("busy");
   try {
-    render(await api("POST", path));
+    render(await api("POST", path, body));
     if (okMsg) toast(okMsg);
   } catch (e) {
     if (e.status === 409) toast(e.message, { type: "error", action: { label: "Settings", fn: openSettings } });
@@ -451,15 +492,11 @@ async function act(path, btn, okMsg) {
 }
 
 function start(btn) {
-  if (status && !status.relay.stream_key_set) { openSettings("TWITCH_STREAM_KEY"); return; }
+  if (status && !status.relay.stream_key_set) { openSettings("twitch.stream_key"); return; }
   act("/api/start", btn, "Stream started");
 }
-const toggleBRB = (btn) => act(status && status.output.forced_fallback ? "/api/fallback/release" : "/api/fallback/force", btn);
 $("btn-start").addEventListener("click", (e) => start(e.currentTarget));
 $("dock-start").addEventListener("click", (e) => start(e.currentTarget));
-$("seg-auto").addEventListener("click", (e) => status && status.output.forced_fallback && toggleBRB(e.currentTarget));
-$("seg-brb").addEventListener("click", (e) => status && !status.output.forced_fallback && toggleBRB(e.currentTarget));
-$("dock-brb").addEventListener("click", (e) => toggleBRB(e.currentTarget));
 $("btn-reconnect").addEventListener("click", (e) => act("/api/reconnect", e.currentTarget, "Reconnected to Twitch"));
 $("dock-reconnect").addEventListener("click", (e) => act("/api/reconnect", e.currentTarget, "Reconnected to Twitch"));
 
@@ -589,7 +626,8 @@ function renderSettings() {
   }
   const nodes = [];
   if (settings.save_error) nodes.push(h("p", { class: "notice" }, "Changes are active but couldn't be saved, they are lost on restart: " + settings.save_error));
-  else if (!settings.persisted && settings.file === "") nodes.push(h("p", { class: "notice" }, "SETTINGS_FILE is not set, changes are lost on restart."));
+  else if (!settings.persisted && !settings.file) nodes.push(h("p", { class: "notice" }, "web.settings_file is not set, changes are lost on restart."));
+  if (!settings.config_file) nodes.push(h("p", { class: "notice" }, "No config file found, the read-only settings use their defaults."));
   for (const [name, items] of groups) {
     nodes.push(h("section", { class: "group" },
       h("div", { class: "group-title" }, name),
@@ -597,7 +635,7 @@ function renderSettings() {
   }
   nodes.push(browserGroup());
   body.replaceChildren(...nodes);
-  setText("settings-sub", settings.persisted ? "Saved to " + settings.file + ", overrides .env" : "Changes here override .env");
+  setText("settings-sub", (settings.persisted ? "Saved to " + settings.file + ", overrides " : "Changes here override ") + (settings.config_file || "the config file"));
   paintIcons(body);
   updateFoot();
   if (focusKey) {
@@ -617,7 +655,7 @@ function fieldNode(s) {
     const v = s.kind === "secret" ? (s.is_set ? "set" : "not set") : (s.value || "—");
     wrap.append(h("div", { class: "readonly-val", title: v, html: icon("lock") }, v));
     if (s.help) wrap.append(h("p", { class: "field-help" }, s.help));
-    wrap.append(h("div", { class: "field-meta" }, h("span", {}, "From .env, needs a restart to change")));
+    wrap.append(h("div", { class: "field-meta" }, h("span", {}, "From the config file, needs a restart to change")));
     return wrap;
   }
 
@@ -639,8 +677,9 @@ function fieldNode(s) {
     input.addEventListener("change", () => onChange(String(input.checked)));
     control = h("label", { class: "switch" }, input, h("span", { class: "switch-track" }, h("span", { class: "switch-thumb" })));
     top.append(control);
-  } else if (s.kind === "select") {
-    control = h("select", { class: "select mono" }, s.options.map((o) => h("option", { value: o, selected: o === s.value }, o)));
+  } else if (s.kind === "select" || s.kind === "scene") {
+    control = h("select", { class: "select" + (s.kind === "select" ? " mono" : "") },
+      s.options.map((o) => h("option", { value: o.value, selected: o.value === s.value }, o.label)));
     control.addEventListener("change", () => onChange(control.value));
     wrap.append(control);
   } else if (s.kind === "secret") {
@@ -672,13 +711,13 @@ function fieldNode(s) {
   const meta = h("div", { class: "field-meta" }, h("span", {}, "Applies: " + s.applies));
   if (s.overridden) {
     meta.append(h("span", { class: "badge" }, "UI override"));
-    const envShown = s.kind === "secret" ? "" : ` (${s.env_value || "empty"})`;
+    const fileShown = s.kind === "secret" ? "" : ` (${s.file_value || "empty"})`;
     meta.append(h("button", {
-      class: "link-btn", type: "button", title: "Use the value from .env again",
+      class: "link-btn", type: "button", title: "Use the value from the config file again",
       onclick: () => { dirty[s.key] = null; markDirty(wrap, s.key); updateFoot(); },
-    }, "Reset to .env" + envShown));
+    }, "Reset to config file" + fileShown));
   }
-  if (s.kind === "secret" && s.is_set && s.key === "SRT_PASSPHRASE") {
+  if (s.kind === "secret" && s.is_set && s.key === "srt.passphrase") {
     meta.append(h("button", { class: "link-btn", type: "button", onclick: () => { dirty[s.key] = ""; markDirty(wrap, s.key); updateFoot(); } }, "Remove passphrase"));
   }
   meta.append(h("span", { class: "badge dirty", hidden: true }, "unsaved"));
@@ -691,7 +730,7 @@ function markDirty(wrap, key) {
   if (!b) return;
   const has = key in dirty;
   b.hidden = !has;
-  b.textContent = dirty[key] === null ? "will reset" : dirty[key] === "" && key === "SRT_PASSPHRASE" ? "will remove" : "unsaved";
+  b.textContent = dirty[key] === null ? "will reset" : dirty[key] === "" && key === "srt.passphrase" ? "will remove" : "unsaved";
 }
 
 function browserGroup() {
@@ -737,17 +776,17 @@ $("settings-save").addEventListener("click", async (e) => {
     dirty = {};
     renderSettings();
     poll();
-    const twitch = ["TWITCH_STREAM_KEY", "TWITCH_RTMP_URL"].some((k) => k in changes);
+    const twitch = ["twitch.stream_key", "twitch.rtmp_url"].some((k) => k in changes);
     if (settings.save_error) toast("Applied, but not saved: " + settings.save_error, { type: "error" });
     else if (twitch && status && status.output.running) {
       toast("Saved. Applies on the next Twitch connection.", { action: { label: "Reconnect now", fn: () => act("/api/reconnect", null, "Reconnected to Twitch") } });
     } else toast("Settings saved");
   } catch (err) {
     if (err.status === 401) return;
-    const key = (err.message.match(/^([A-Z_]+):?/) || [])[1];
+    const key = (err.message.match(/^([a-z_]+\.[a-z_]+):?/) || [])[1];
     const field = key && $("settings-body").querySelector(`[data-key="${key}"]`);
     if (field) {
-      field.querySelector(".field-error").textContent = err.message.replace(/^[A-Z_]+:\s*/, "");
+      field.querySelector(".field-error").textContent = err.message.replace(/^[a-z_]+\.[a-z_]+:\s*/, "");
       field.querySelector(".input")?.classList.add("invalid");
       field.scrollIntoView({ block: "center", behavior: "smooth" });
     } else toast(err.message, { type: "error" });

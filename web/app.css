@@ -236,7 +236,7 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
   opacity: .9; transition: background .4s;
 }
 .hero[data-state="live"] { --c: var(--live); --cbg: var(--live-bg); }
-.hero[data-state="fallback"], .hero[data-state="forced"] { --c: var(--fb); --cbg: var(--fb-bg); }
+.hero[data-state="fallback"], .hero[data-state="scene"] { --c: var(--fb); --cbg: var(--fb-bg); }
 .hero[data-state="reconnecting"] { --c: var(--bad); --cbg: var(--bad-bg); }
 .hero-main { display: flex; flex-direction: column; gap: 6px; position: relative; z-index: 1; }
 .hero-badge {
@@ -420,7 +420,6 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 }
 .segmented button:hover { color: var(--fg); }
 .segmented button[aria-pressed="true"] { background: var(--surface); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 0 0 1px var(--border-2); }
-#seg-brb[aria-pressed="true"] { color: var(--fb); }
 .segmented.small { height: 30px; padding: 2px; }
 .segmented.small button { padding: 0 10px; font-size: 12.5px; border-radius: 6px; }
 
@@ -429,6 +428,31 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 .controls-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .controls-row #btn-start, .controls-row #btn-stop { min-width: 200px; }
 .controls-row #btn-reconnect { margin-left: auto; }
+
+/* ---------- Scenes ---------- */
+.scenes { display: flex; flex-direction: column; gap: 8px; }
+.scenes-head { display: flex; align-items: baseline; gap: 10px; }
+.scenes-title { font-size: 12px; font-weight: 500; color: var(--fg-2); text-transform: uppercase; letter-spacing: .04em; }
+.scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.scene-btn {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0;
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--fg-2);
+  text-align: left; font: inherit;
+  touch-action: manipulation;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s, transform .1s;
+}
+.scene-btn:hover { color: var(--fg); border-color: var(--border-2); }
+.scene-btn:active { transform: scale(.98); }
+.scene-btn.busy { pointer-events: none; opacity: .7; }
+.scene-btn[aria-pressed="true"] { background: var(--surface); color: var(--fg); border-color: var(--fg-3); box-shadow: 0 1px 2px rgba(0, 0, 0, .3); }
+.scene-btn[aria-pressed="true"]:not([data-scene=""]) { border-color: color-mix(in srgb, var(--fb) 55%, transparent); background: var(--fb-bg); }
+.scene-name { display: flex; align-items: center; gap: 7px; max-width: 100%; font-weight: 500; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scene-sub { max-width: 100%; font-size: 12px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scene-sub.warn { color: var(--fb); }
+.scene-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--border-2); transition: background .15s, box-shadow .15s; }
+.scene-btn[data-onair="true"] .scene-dot { background: var(--fb); box-shadow: 0 0 0 3px var(--fb-bg); }
+.scene-btn[data-scene=""][data-onair="true"] .scene-dot { background: var(--live); box-shadow: 0 0 0 3px var(--live-bg); }
 
 /* ---------- Metrics ---------- */
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
@@ -670,7 +694,11 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
   }
   .dock .btn { height: 48px; font-size: 15px; border-radius: 12px; }
   .dock #dock-start, .dock #dock-stop { flex: 1; }
-  .dock #dock-brb[aria-pressed="true"] { color: var(--fb); border-color: color-mix(in srgb, var(--fb) 40%, transparent); background: var(--fb-bg); }
+  .dock-scene { position: relative; max-width: 40%; }
+  .dock-scene #dock-scene-label { overflow: hidden; text-overflow: ellipsis; }
+  /* the native picker is invisible but covers the button, so a tap opens it */
+  .dock-scene select { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; opacity: 0; font-size: 16px; cursor: pointer; }
+  .dock-scene[data-picked="true"] { color: var(--fb); border-color: color-mix(in srgb, var(--fb) 40%, transparent); background: var(--fb-bg); }
   .dock .btn-icon { width: 48px; }
 
   .drawer {
@@ -689,8 +717,8 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 }
 
 @media (max-width: 380px) {
-  .dock #dock-brb span:last-child { display: none; }
-  .dock #dock-brb { width: 48px; padding: 0; }
+  .dock-scene #dock-scene-label { display: none; }
+  .dock .dock-scene { width: 48px; padding: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

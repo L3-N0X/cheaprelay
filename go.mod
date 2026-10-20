@@ -2,7 +2,10 @@ module github.com/lenox/srt-twitch-relay
 
 go 1.26.0
 
-require github.com/datarhei/gosrt v0.12.0
+require (
+	github.com/BurntSushi/toml v1.6.0
+	github.com/datarhei/gosrt v0.12.0
+)
 
 require (
 	github.com/benburkert/openpgp v0.0.0-20160410205803-c2471f86866c // indirect

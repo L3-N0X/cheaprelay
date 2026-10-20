@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,7 +19,10 @@ import (
 )
 
 func main() {
-	cfg, err := LoadConfig()
+	configPath := flag.String("config", "config.toml", "path to the TOML config file")
+	flag.Parse()
+
+	cfg, warnings, err := LoadConfig(*configPath)
 	var level slog.LevelVar
 	level.Set(parseLevel(cfg.LogLevel))
 	logs := &LogRing{}
@@ -31,6 +35,12 @@ func main() {
 		log.Error("invalid configuration", "err", err)
 		os.Exit(2)
 	}
+	for _, w := range warnings {
+		log.Warn(w)
+	}
+	if cfg.ConfigFile != "" {
+		log.Info("loaded config file", "path", cfg.ConfigFile)
+	}
 
 	settings := NewSettings(cfg, log)
 	settings.Load()
@@ -38,21 +48,24 @@ func main() {
 	cfg = settings.Get()
 	level.Set(parseLevel(cfg.LogLevel))
 	if cfg.StreamKey == "" {
-		log.Warn("TWITCH_STREAM_KEY is not set: set it in .env or in the web UI before starting the stream")
+		log.Warn("no stream key set: set twitch.stream_key in the config file or in the web UI before starting the stream")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	fallback, err := ensureFallbackFile(cfg, log)
+	scenes, err := prepareScenes(cfg, log)
 	if err != nil {
-		log.Error("no usable fallback file", "err", err)
+		log.Error("no usable scenes", "err", err)
 		os.Exit(1)
 	}
-	log.Info("using fallback file", "path", fallback)
+	for _, sc := range scenes {
+		log.Info("scene", "id", sc.ID, "name", sc.Name, "file", sc.Path,
+			"placeholder", sc.Placeholder, "fallback", sc.ID == cfg.FallbackScene)
+	}
 
 	in := NewIngest(settings, log)
-	sup := NewSupervisor(settings, in, fallback, log)
+	sup := NewSupervisor(settings, in, scenes, log)
 	preview := NewPreview(settings, in, log)
 	api := NewAPI(settings, sup, in, preview, logs, log)
 
@@ -62,7 +75,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	if cfg.APIToken == "" {
-		log.Warn("API_TOKEN is not set: anyone who can reach the API can control the stream")
+		log.Warn("web.api_token is not set: anyone who can reach the API can control the stream")
 	}
 
 	errc := make(chan error, 2)

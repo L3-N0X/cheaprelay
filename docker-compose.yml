@@ -5,12 +5,12 @@ services:
     container_name: srt-twitch-relay
     restart: unless-stopped
     init: true
-    env_file: .env
     ports:
       - "9000:9000/udp" # SRT from the phone
       - "8080:8080"     # control API + web UI (see README: put HTTPS in front of it)
     volumes:
-      - ./media:/media  # put your fallback.mp4 here
+      - ./config.toml:/config/config.toml:ro # copy config.example.toml
+      - ./media:/media  # put your scene videos here
       - relay-data:/data # settings changed in the web UI
     # "docker compose down/stop" ends the stream gracefully; give ffmpeg time for that
     stop_grace_period: 15s

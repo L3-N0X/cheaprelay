@@ -21,3 +21,4 @@ EXPOSE 9000/udp 8080/tcp
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
     CMD wget -qO /dev/null http://127.0.0.1:8080/healthz || exit 1
 ENTRYPOINT ["srt-twitch-relay"]
+CMD ["-config", "/config/config.toml"]

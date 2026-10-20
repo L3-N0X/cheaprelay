@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -38,16 +39,24 @@ type statusResponse struct {
 
 // relayInfo is what the web UI needs to show how to connect the phone.
 type relayInfo struct {
-	SRTPort         string `json:"srt_port"`
-	SRTStreamID     string `json:"srt_stream_id,omitempty"`
-	SRTPassphrase   bool   `json:"srt_passphrase"`
-	SRTLatencyMs    int64  `json:"srt_latency_ms"`
-	StreamKeySet    bool   `json:"stream_key_set"`
-	PreviewEnabled  bool   `json:"preview_enabled"`
-	InputTimeoutMs  int64  `json:"input_timeout_ms"`
-	LiveStableMs    int64  `json:"live_stable_ms"`
-	FallbackMaxSecs int64  `json:"fallback_max_s"`
-	LogSeq          uint64 `json:"log_seq"`
+	SRTPort         string      `json:"srt_port"`
+	SRTStreamID     string      `json:"srt_stream_id,omitempty"`
+	SRTPassphrase   bool        `json:"srt_passphrase"`
+	SRTLatencyMs    int64       `json:"srt_latency_ms"`
+	StreamKeySet    bool        `json:"stream_key_set"`
+	PreviewEnabled  bool        `json:"preview_enabled"`
+	InputTimeoutMs  int64       `json:"input_timeout_ms"`
+	LiveStableMs    int64       `json:"live_stable_ms"`
+	FallbackMaxSecs int64       `json:"fallback_max_s"`
+	Scenes          []sceneInfo `json:"scenes"`
+	FallbackScene   string      `json:"fallback_scene"`
+	LogSeq          uint64      `json:"log_seq"`
+}
+
+type sceneInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Placeholder bool   `json:"placeholder,omitempty"` // the file is missing, a dark screen is shown
 }
 
 type inputStatus struct {
@@ -91,14 +100,16 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /api/logs", a.auth(http.HandlerFunc(a.handleLogs)))
 	mux.Handle("GET /api/settings", a.auth(http.HandlerFunc(a.handleSettings)))
 	mux.Handle("PATCH /api/settings", a.auth(http.HandlerFunc(a.handleUpdateSettings)))
-	mux.Handle("POST /api/start", a.action("start", a.sup.Start))
-	mux.Handle("POST /api/stop", a.action("stop", a.sup.Stop))
-	mux.Handle("POST /api/reconnect", a.action("reconnect", a.sup.Reconnect))
-	mux.Handle("POST /api/fallback/force", a.action("force fallback", func(ctx context.Context) error {
-		return a.sup.SetForceFallback(ctx, true)
+	mux.Handle("POST /api/start", a.action("start", noBody(a.sup.Start)))
+	mux.Handle("POST /api/stop", a.action("stop", noBody(a.sup.Stop)))
+	mux.Handle("POST /api/reconnect", a.action("reconnect", noBody(a.sup.Reconnect)))
+	mux.Handle("POST /api/scene", a.action("pick scene", a.pickScene))
+	// Shortcuts for a single BRB button: show the fallback scene / go back to automatic.
+	mux.Handle("POST /api/fallback/force", a.action("force fallback", func(ctx context.Context, _ *http.Request) error {
+		return a.sup.PickScene(ctx, a.settings.Get().FallbackScene)
 	}))
-	mux.Handle("POST /api/fallback/release", a.action("release fallback", func(ctx context.Context) error {
-		return a.sup.SetForceFallback(ctx, false)
+	mux.Handle("POST /api/fallback/release", a.action("release fallback", func(ctx context.Context, _ *http.Request) error {
+		return a.sup.PickScene(ctx, "")
 	}))
 	return mux
 }
@@ -141,8 +152,12 @@ func (a *API) status() statusResponse {
 		InputTimeoutMs:  cfg.InputTimeout.Milliseconds(),
 		LiveStableMs:    cfg.LiveStableTime.Milliseconds(),
 		FallbackMaxSecs: int64(cfg.FallbackMaxDuration.Seconds()),
+		FallbackScene:   cfg.FallbackScene,
 		LogSeq:          a.logs.Seq(),
 	}}
+	for _, sc := range a.sup.Scenes() {
+		resp.Relay.Scenes = append(resp.Relay.Scenes, sceneInfo{ID: sc.ID, Name: sc.Name, Placeholder: sc.Placeholder})
+	}
 	if cfg.Preview {
 		if f := a.preview.Latest(); f.Seq > 0 {
 			resp.Preview = &f
@@ -188,8 +203,8 @@ func (a *API) handleSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.settings.View())
 }
 
-// handleUpdateSettings takes {"KEY": "value"} to change and {"KEY": null} to
-// reset settings to their .env value.
+// handleUpdateSettings takes {"section.key": "value"} to change and
+// {"section.key": null} to reset settings to their config file value.
 func (a *API) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var changes map[string]*string
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&changes); err != nil {
@@ -198,9 +213,9 @@ func (a *API) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.settings.Get().APIToken == "" {
 		for k := range changes {
-			if k == "TWITCH_STREAM_KEY" || k == "TWITCH_RTMP_URL" || k == "SRT_PASSPHRASE" {
+			if k == "twitch.stream_key" || k == "twitch.rtmp_url" || k == "srt.passphrase" {
 				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": k + " can only be changed from the web UI when API_TOKEN is set"})
+					"error": k + " can only be changed from the web UI when web.api_token is set"})
 				return
 			}
 		}
@@ -213,15 +228,35 @@ func (a *API) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.settings.View())
 }
 
-func (a *API) action(name string, fn func(context.Context) error) http.Handler {
+// pickScene takes {"scene": "<id>"}, or {"scene": ""} for automatic switching.
+func (a *API) pickScene(ctx context.Context, r *http.Request) error {
+	var body struct {
+		Scene *string `json:"scene"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&body); err != nil || body.Scene == nil {
+		return errBadRequest
+	}
+	return a.sup.PickScene(ctx, *body.Scene)
+}
+
+func noBody(fn func(context.Context) error) func(context.Context, *http.Request) error {
+	return func(ctx context.Context, _ *http.Request) error { return fn(ctx) }
+}
+
+var errBadRequest = errors.New(`expected {"scene": "<id>"}, or {"scene": ""} for automatic`)
+
+func (a *API) action(name string, fn func(context.Context, *http.Request) error) http.Handler {
 	return a.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.log.Info("api request", "action", name, "remote", r.RemoteAddr)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
-		if err := fn(ctx); err != nil {
+		if err := fn(ctx, r); err != nil {
 			code := http.StatusServiceUnavailable
-			if errors.Is(err, errNoStreamKey) {
+			switch {
+			case errors.Is(err, errNoStreamKey):
 				code = http.StatusConflict
+			case errors.Is(err, errUnknownScene), errors.Is(err, errBadRequest):
+				code = http.StatusBadRequest
 			}
 			writeJSON(w, code, map[string]string{"error": err.Error()})
 			return

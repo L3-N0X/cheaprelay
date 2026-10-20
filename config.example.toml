@@ -1,0 +1,66 @@
+# Copy to config.toml and fill in. See README.md for all options.
+#
+# Settings marked (UI) can also be changed in the web dashboard. Changes made
+# there are saved to web.settings_file and override the values in this file.
+# Durations use Go syntax: "500ms", "3s", "10m".
+
+[twitch]
+# Twitch dashboard -> Settings -> Stream -> Primary Stream Key (UI)
+stream_key = "live_000000000_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# Closest ingest server, see https://help.twitch.tv/s/twitch-ingest-recommendation (UI)
+#rtmp_url = "rtmp://live.twitch.tv/app"
+# Go live as soon as the relay starts (UI)
+#autostart = false
+
+[srt]
+# SRT encryption, 10-79 characters. Set the same passphrase in the phone app. (UI)
+passphrase = ""
+# Only accept SRT connections with exactly this stream id (UI)
+#stream_id = ""
+#latency = "2s"
+#listen_addr = ":9000"
+
+[switching]
+# Scene shown automatically when the phone drops. Default: the first scene. (UI)
+#fallback_scene = "brb"
+#input_timeout = "1500ms"      # (UI)
+#live_stable_time = "3s"       # (UI)
+#fallback_max_duration = "0"   # (UI) end the stream after the phone was gone this long
+                               #      in the fallback scene, 0 = never
+
+[web]
+# Protects the web UI / API. Generate with: openssl rand -hex 24
+api_token = ""
+#listen_addr = ":8080"
+#preview = true                # (UI)
+#settings_file = "/data/settings.json"
+
+#[ffmpeg]
+#path = "ffmpeg"
+#log_level = "warning"         # (UI)
+#analyze_duration = "1s"       # (UI)
+
+#[log]
+#level = "info"                # (UI)
+
+# Scenes are videos streamed instead of the phone. Pick one in the web UI to
+# show it even when the phone is fine (e.g. before and after the stream), or
+# let the relay show the fallback scene when the phone drops.
+# Convert every file with make-fallback (see README). Relative paths are
+# relative to this file. A missing file is replaced with a dark screen.
+# Without any scenes, a single "fallback" scene with /media/fallback.mp4 is used.
+
+[[scenes]]
+id = "brb"                     # lowercase letters, digits, - and _
+name = "Be right back"
+file = "/media/brb.mp4"
+
+[[scenes]]
+id = "starting"
+name = "Starting soon"
+file = "/media/starting.mp4"
+
+[[scenes]]
+id = "ending"
+name = "Thanks for watching"
+file = "/media/ending.mp4"

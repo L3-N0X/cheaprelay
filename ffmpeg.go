@@ -32,6 +32,7 @@ const (
 // broadcast immediately.
 type ffmpegProc struct {
 	mode      Mode
+	scene     string // fallback only: the scene being streamed
 	startedAt time.Time
 	log       *slog.Logger
 
@@ -47,7 +48,9 @@ type ffmpegProc struct {
 	closeOnce sync.Once
 }
 
-func startFFmpeg(cfg Config, mode Mode, fallbackFile string, log *slog.Logger) (*ffmpegProc, error) {
+// startFFmpeg starts streaming the phone's input (live) or a scene's file
+// (fallback) to Twitch.
+func startFFmpeg(cfg Config, mode Mode, scene *PreparedScene, log *slog.Logger) (*ffmpegProc, error) {
 	args := []string{"-hide_banner", "-nostdin", "-nostats", "-loglevel", cfg.FFmpegLogLevel}
 	switch mode {
 	case ModeLive:
@@ -58,7 +61,10 @@ func startFFmpeg(cfg Config, mode Mode, fallbackFile string, log *slog.Logger) (
 			"-analyzeduration", strconv.FormatInt(cfg.AnalyzeDuration.Microseconds(), 10),
 			"-f", "mpegts", "-i", "pipe:3")
 	case ModeFallback:
-		args = append(args, "-re", "-stream_loop", "-1", "-i", fallbackFile)
+		if scene == nil {
+			return nil, errors.New("no scene to stream")
+		}
+		args = append(args, "-re", "-stream_loop", "-1", "-i", scene.Path)
 	default:
 		return nil, fmt.Errorf("invalid mode %q", mode)
 	}
@@ -116,6 +122,10 @@ func startFFmpeg(cfg Config, mode Mode, fallbackFile string, log *slog.Logger) (
 		close(p.done)
 	}()
 
+	if scene != nil {
+		p.scene = scene.ID
+		p.log = p.log.With("scene", scene.ID)
+	}
 	p.log.Info("ffmpeg started", "pid", p.cmd.Process.Pid)
 	return p, nil
 }
@@ -213,28 +223,53 @@ func (p *ffmpegProc) logStderr(r io.Reader) {
 	_, _ = io.Copy(io.Discard, r) // never block ffmpeg if scanning stopped early
 }
 
-// ensureFallbackFile returns a usable fallback file. If the configured file is
-// missing, a plain dark screen with silence is generated so the relay still
-// works out of the box.
-func ensureFallbackFile(cfg Config, log *slog.Logger) (string, error) {
-	out := os.TempDir() + "/default-fallback.mp4"
-	st, err := os.Stat(cfg.FallbackFile)
-	switch {
-	case err == nil && !st.IsDir():
-		checkFallbackFile(cfg, cfg.FallbackFile, log)
-		return cfg.FallbackFile, nil
-	case err == nil:
-		// Typically "rclone copy video.mp4 remote:media/fallback.mp4", which
-		// creates a directory named fallback.mp4 with the video inside.
-		log.Warn("fallback path is a directory, not a file (use \"rclone copyto\" or \"scp\" to upload a single file); generating a plain dark screen instead",
-			"configured", cfg.FallbackFile, "generated", out)
-	case errors.Is(err, os.ErrNotExist):
-		log.Warn("fallback file not found, generating a plain dark screen instead",
-			"configured", cfg.FallbackFile, "generated", out)
-	default:
-		return "", fmt.Errorf("fallback file: %w", err)
-	}
+// PreparedScene is a scene with the file that is actually streamed.
+type PreparedScene struct {
+	Scene
+	Path string
+	// Placeholder is set when the scene's file is missing and a plain dark
+	// screen is streamed instead.
+	Placeholder bool
+}
 
+// prepareScenes checks every scene's file. Missing files are replaced with a
+// plain dark screen with silence, so the relay still works out of the box.
+func prepareScenes(cfg Config, log *slog.Logger) ([]PreparedScene, error) {
+	placeholder := ""
+	out := make([]PreparedScene, 0, len(cfg.Scenes))
+	for _, sc := range cfg.Scenes {
+		p := PreparedScene{Scene: sc, Path: sc.File}
+		st, err := os.Stat(sc.File)
+		switch {
+		case err == nil && !st.IsDir():
+			checkSceneFile(cfg, sc, log)
+		case err == nil:
+			// Typically "rclone copy video.mp4 remote:media/brb.mp4", which
+			// creates a directory named brb.mp4 with the video inside.
+			log.Warn("scene file is a directory, not a file (use \"rclone copyto\" or \"scp\" to upload a single file); streaming a plain dark screen instead",
+				"scene", sc.ID, "file", sc.File)
+			p.Placeholder = true
+		case errors.Is(err, os.ErrNotExist):
+			log.Warn("scene file not found, streaming a plain dark screen instead", "scene", sc.ID, "file", sc.File)
+			p.Placeholder = true
+		default:
+			return nil, fmt.Errorf("scene %s: %w", sc.ID, err)
+		}
+		if p.Placeholder {
+			if placeholder == "" {
+				if placeholder, err = generatePlaceholder(cfg); err != nil {
+					return nil, err
+				}
+			}
+			p.Path = placeholder
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func generatePlaceholder(cfg Config) (string, error) {
+	out := filepath.Join(os.TempDir(), "placeholder-scene.mp4")
 	cmd := exec.Command(cfg.FFmpegPath, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-f", "lavfi", "-i", "color=c=0x18181b:s=1280x720:r=30",
 		"-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
@@ -244,15 +279,16 @@ func ensureFallbackFile(cfg Config, log *slog.Logger) (string, error) {
 		out,
 	)
 	if b, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("generate default fallback: %w: %s", err, b)
+		return "", fmt.Errorf("generate placeholder scene: %w: %s", err, b)
 	}
 	return out, nil
 }
 
-// checkFallbackFile warns if the fallback clip is likely to be rejected by
-// Twitch. It is streamed with -c copy, so it has to be prepared with
-// make-fallback (H.264 + AAC, at most 1080p).
-func checkFallbackFile(cfg Config, path string, log *slog.Logger) {
+// checkSceneFile warns if a scene's clip is likely to be rejected by Twitch.
+// It is streamed with -c copy, so it has to be prepared with make-fallback
+// (H.264 + AAC, at most 1080p).
+func checkSceneFile(cfg Config, sc Scene, log *slog.Logger) {
+	path := sc.File
 	ffprobe := "ffprobe"
 	if dir := filepath.Dir(cfg.FFmpegPath); dir != "." {
 		ffprobe = filepath.Join(dir, "ffprobe")
@@ -260,7 +296,7 @@ func checkFallbackFile(cfg Config, path string, log *slog.Logger) {
 	b, err := exec.Command(ffprobe, "-v", "error", "-show_entries", "stream=codec_type,codec_name,height",
 		"-of", "csv=p=0", path).Output()
 	if err != nil {
-		log.Warn("could not inspect the fallback file", "path", path, "err", err)
+		log.Warn("could not inspect the scene file", "scene", sc.ID, "file", path, "err", err)
 		return
 	}
 	var video, audio string
@@ -288,7 +324,7 @@ func checkFallbackFile(cfg Config, path string, log *slog.Logger) {
 		problems = append(problems, fmt.Sprintf("audio codec is %q, Twitch needs aac", audio))
 	}
 	if len(problems) > 0 {
-		log.Warn("fallback file is not prepared for Twitch, convert it with make-fallback (see README)",
-			"path", path, "problems", strings.Join(problems, "; "))
+		log.Warn("scene file is not prepared for Twitch, convert it with make-fallback (see README)",
+			"scene", sc.ID, "file", path, "problems", strings.Join(problems, "; "))
 	}
 }

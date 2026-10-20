@@ -20,30 +20,30 @@ const (
 // All state below "owned by the run loop" is only touched by Run; the API
 // talks to it through do().
 type Supervisor struct {
-	settings     *Settings
-	log          *slog.Logger
-	in           *Ingest
-	fallbackFile string
+	settings *Settings
+	log      *slog.Logger
+	in       *Ingest
+	scenes   []PreparedScene // fixed at startup
 
 	cmds     chan command
 	loopDone chan struct{}
 
 	// owned by the run loop
-	wantRunning   bool
-	forceFallback bool
-	proc          *ffmpegProc
-	procSession   uint64
-	mode          Mode
-	modeSince     time.Time
-	failures      int
-	failedMode    Mode // mode of the last failed ffmpeg; retryAt only delays this mode
-	retryAt       time.Time
-	switches      int
-	restarts      int
-	lastError     string
-	lastErrorAt   time.Time
-	hevcSession   uint64 // SRT session the H.265 error was last reported for
-	startedAt     time.Time
+	wantRunning bool
+	pickedScene string // scene picked by hand, shown even if the phone is fine; "" = automatic
+	proc        *ffmpegProc
+	procSession uint64
+	out         output
+	modeSince   time.Time
+	failures    int
+	failed      output // output of the last failed ffmpeg; retryAt only delays this one
+	retryAt     time.Time
+	switches    int
+	restarts    int
+	lastError   string
+	lastErrorAt time.Time
+	hevcSession uint64 // SRT session the H.265 error was last reported for
+	startedAt   time.Time
 
 	statusMu sync.Mutex
 	status   OutputStatus
@@ -54,33 +54,62 @@ type command struct {
 	done  chan struct{} // closed once the change has been reconciled
 }
 
-type OutputStatus struct {
-	Running        bool      `json:"running"`
-	StartedAt      time.Time `json:"started_at,omitzero"` // when the broadcast was started
-	Mode           Mode      `json:"mode"`
-	ModeSince      time.Time `json:"mode_since"`
-	ForcedFallback bool      `json:"forced_fallback"`
-	FFmpegRunning  bool      `json:"ffmpeg_running"`
-	FFmpegPID      int       `json:"ffmpeg_pid,omitempty"`
-	Switches       int       `json:"switches"`
-	Restarts       int       `json:"restarts"`
-	LastError      string    `json:"last_error,omitempty"`
-	LastErrorAt    time.Time `json:"last_error_at,omitzero"`
+// output is what is streamed to Twitch: the phone, a scene or nothing.
+type output struct {
+	mode  Mode
+	scene string // fallback only
 }
 
-var errShuttingDown = errors.New("relay is shutting down")
-
-func NewSupervisor(settings *Settings, in *Ingest, fallbackFile string, log *slog.Logger) *Supervisor {
-	return &Supervisor{
-		settings:     settings,
-		log:          log.With("component", "supervisor"),
-		in:           in,
-		fallbackFile: fallbackFile,
-		cmds:         make(chan command),
-		loopDone:     make(chan struct{}),
-		mode:         ModeStopped,
-		modeSince:    time.Now(),
+func (o output) String() string {
+	if o.scene != "" {
+		return string(o.mode) + " (" + o.scene + ")"
 	}
+	return string(o.mode)
+}
+
+type OutputStatus struct {
+	Running       bool      `json:"running"`
+	StartedAt     time.Time `json:"started_at,omitzero"` // when the broadcast was started
+	Mode          Mode      `json:"mode"`
+	Scene         string    `json:"scene,omitempty"` // the scene on air in fallback mode
+	ModeSince     time.Time `json:"mode_since"`
+	PickedScene   string    `json:"picked_scene,omitempty"` // "" = automatic
+	FFmpegRunning bool      `json:"ffmpeg_running"`
+	FFmpegPID     int       `json:"ffmpeg_pid,omitempty"`
+	Switches      int       `json:"switches"`
+	Restarts      int       `json:"restarts"`
+	LastError     string    `json:"last_error,omitempty"`
+	LastErrorAt   time.Time `json:"last_error_at,omitzero"`
+}
+
+var (
+	errShuttingDown = errors.New("relay is shutting down")
+	errUnknownScene = errors.New("unknown scene")
+)
+
+func NewSupervisor(settings *Settings, in *Ingest, scenes []PreparedScene, log *slog.Logger) *Supervisor {
+	return &Supervisor{
+		settings:  settings,
+		log:       log.With("component", "supervisor"),
+		in:        in,
+		scenes:    scenes,
+		cmds:      make(chan command),
+		loopDone:  make(chan struct{}),
+		out:       output{mode: ModeStopped},
+		modeSince: time.Now(),
+	}
+}
+
+// Scenes returns the scenes with their files. They don't change at runtime.
+func (s *Supervisor) Scenes() []PreparedScene { return s.scenes }
+
+func (s *Supervisor) scene(id string) *PreparedScene {
+	for i := range s.scenes {
+		if s.scenes[i].ID == id {
+			return &s.scenes[i]
+		}
+	}
+	return nil
 }
 
 func (s *Supervisor) Run(ctx context.Context) {
@@ -112,7 +141,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 				s.log.Info("shutting down, ending stream")
 				s.stopProc()
 			}
-			s.setMode(ModeStopped)
+			s.setOutput(output{mode: ModeStopped})
 			s.publish()
 			return
 		case c := <-s.cmds:
@@ -141,18 +170,18 @@ func (s *Supervisor) reconcile(now time.Time) {
 		if s.proc != nil {
 			s.stopProc()
 		}
-		s.setMode(ModeStopped)
+		s.setOutput(output{mode: ModeStopped})
 		return
 	}
 
-	if cfg.FallbackMaxDuration > 0 && !s.forceFallback && s.mode == ModeFallback &&
+	if cfg.FallbackMaxDuration > 0 && s.pickedScene == "" && s.out.mode == ModeFallback &&
 		!in.Active && now.Sub(s.modeSince) >= cfg.FallbackMaxDuration {
-		s.log.Warn("no input for FALLBACK_MAX_DURATION, ending the stream", "after", cfg.FallbackMaxDuration)
+		s.log.Warn("no input for switching.fallback_max_duration, ending the stream", "after", cfg.FallbackMaxDuration)
 		s.wantRunning = false
 		if s.proc != nil {
 			s.stopProc()
 		}
-		s.setMode(ModeStopped)
+		s.setOutput(output{mode: ModeStopped})
 		return
 	}
 
@@ -162,44 +191,52 @@ func (s *Supervisor) reconcile(now time.Time) {
 		s.lastErrorAt = now
 	}
 
-	want := s.desiredMode(in, cfg.LiveStableTime, now)
+	want := output{mode: s.desiredMode(in, cfg.LiveStableTime, now)}
+	if want.mode == ModeFallback {
+		want.scene = cfg.FallbackScene
+		if s.pickedScene != "" {
+			want.scene = s.pickedScene
+		}
+	}
 
-	// The retry delay only holds back the mode that failed. Switching to the
-	// other one (e.g. back to live while the fallback keeps failing) happens
-	// right away.
-	if s.proc == nil && want == s.failedMode && now.Before(s.retryAt) {
+	// The retry delay only holds back the output that failed. Switching to
+	// another one (e.g. back to live while the fallback keeps failing, or to
+	// another scene) happens right away.
+	if s.proc == nil && want == s.failed && now.Before(s.retryAt) {
 		return
 	}
 
-	if s.proc != nil && s.proc.mode == want {
-		if want == ModeLive && in.Active && in.SessionID != s.procSession {
+	if s.proc != nil && procOutput(s.proc) == want {
+		if want.mode == ModeLive && in.Active && in.SessionID != s.procSession {
 			s.log.Info("phone reconnected (new SRT connection), reconnecting live output")
 			s.killProc()
 			s.switches++
-			s.startProc(ModeLive)
+			s.startProc(output{mode: ModeLive})
 		}
 		return
 	}
 
 	if s.proc != nil {
-		s.log.Info("switching output", "from", s.proc.mode, "to", want,
-			"input_active", in.Active, "forced_fallback", s.forceFallback)
+		s.log.Info("switching output", "from", procOutput(s.proc), "to", want,
+			"input_active", in.Active, "picked_scene", s.pickedScene)
 		s.killProc()
 		s.switches++
 	}
 	s.startProc(want)
 }
 
+func procOutput(p *ffmpegProc) output { return output{mode: p.mode, scene: p.scene} }
+
 func (s *Supervisor) desiredMode(in InputState, stableTime time.Duration, now time.Time) Mode {
 	switch {
-	case s.forceFallback || !in.Active:
+	case s.pickedScene != "" || !in.Active:
 		return ModeFallback
 	case in.VideoCodec == codecHEVC:
 		// Twitch drops the connection or shows a broken player for H.265.
 		return ModeFallback
-	case s.mode == ModeLive:
+	case s.out.mode == ModeLive:
 		return ModeLive
-	case s.proc == nil && s.mode == ModeStopped:
+	case s.proc == nil && s.out.mode == ModeStopped:
 		// Fresh start with the phone already sending: nothing to interrupt.
 		return ModeLive
 	case now.Sub(in.ActiveSince) >= stableTime:
@@ -211,13 +248,13 @@ func (s *Supervisor) desiredMode(in InputState, stableTime time.Duration, now ti
 	}
 }
 
-func (s *Supervisor) startProc(mode Mode) {
-	p, err := startFFmpeg(s.settings.Get(), mode, s.fallbackFile, s.log)
+func (s *Supervisor) startProc(o output) {
+	p, err := startFFmpeg(s.settings.Get(), o.mode, s.scene(o.scene), s.log)
 	if err != nil {
-		s.fail(mode, fmt.Sprintf("start ffmpeg (%s): %v", mode, err))
+		s.fail(o, fmt.Sprintf("start ffmpeg (%s): %v", o, err))
 		return
 	}
-	if mode == ModeLive {
+	if o.mode == ModeLive {
 		id, ok := s.in.Attach(p)
 		if !ok {
 			// The phone disconnected in the meantime; the next tick picks fallback.
@@ -227,7 +264,7 @@ func (s *Supervisor) startProc(mode Mode) {
 		s.procSession = id
 	}
 	s.proc = p
-	s.setMode(mode)
+	s.setOutput(o)
 }
 
 // killProc drops the Twitch connection without unpublishing.
@@ -253,14 +290,14 @@ func (s *Supervisor) handleUnexpectedExit() {
 		s.failures = 0
 	}
 	s.restarts++
-	s.fail(p.mode, fmt.Sprintf("ffmpeg (%s) exited unexpectedly: %v", p.mode, err))
+	s.fail(procOutput(p), fmt.Sprintf("ffmpeg (%s) exited unexpectedly: %v", procOutput(p), err))
 }
 
-func (s *Supervisor) fail(mode Mode, msg string) {
-	if mode != s.failedMode {
+func (s *Supervisor) fail(o output, msg string) {
+	if o != s.failed {
 		s.failures = 0
 	}
-	s.failedMode = mode
+	s.failed = o
 	s.failures++
 	backoff := min(time.Duration(1<<min(s.failures-1, 5))*500*time.Millisecond, maxRetryBackoff)
 	s.retryAt = time.Now().Add(backoff)
@@ -269,12 +306,12 @@ func (s *Supervisor) fail(mode Mode, msg string) {
 	s.log.Error(msg, "retry_in", backoff)
 }
 
-func (s *Supervisor) setMode(m Mode) {
-	if m == s.mode {
+func (s *Supervisor) setOutput(o output) {
+	if o == s.out {
 		return
 	}
-	s.log.Info("output mode changed", "from", s.mode, "to", m)
-	s.mode = m
+	s.log.Info("output changed", "from", s.out, "to", o)
+	s.out = o
 	s.modeSince = time.Now()
 }
 
@@ -286,15 +323,16 @@ func (s *Supervisor) publish() {
 		s.startedAt = time.Now()
 	}
 	st := OutputStatus{
-		Running:        s.wantRunning,
-		StartedAt:      s.startedAt,
-		Mode:           s.mode,
-		ModeSince:      s.modeSince,
-		ForcedFallback: s.forceFallback,
-		Switches:       s.switches,
-		Restarts:       s.restarts,
-		LastError:      s.lastError,
-		LastErrorAt:    s.lastErrorAt,
+		Running:     s.wantRunning,
+		StartedAt:   s.startedAt,
+		Mode:        s.out.mode,
+		Scene:       s.out.scene,
+		ModeSince:   s.modeSince,
+		PickedScene: s.pickedScene,
+		Switches:    s.switches,
+		Restarts:    s.restarts,
+		LastError:   s.lastError,
+		LastErrorAt: s.lastErrorAt,
 	}
 	if s.proc != nil {
 		st.FFmpegRunning = true
@@ -346,20 +384,29 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	})
 }
 
+// Stop ends the broadcast. A picked scene (typically an "ending" screen) is
+// reset, so the next stream doesn't start with it.
 func (s *Supervisor) Stop(ctx context.Context) error {
 	return s.do(ctx, func() {
 		if s.wantRunning {
 			s.log.Info("stop requested")
 			s.wantRunning = false
+			s.pickedScene = ""
 		}
 	})
 }
 
-func (s *Supervisor) SetForceFallback(ctx context.Context, on bool) error {
+// PickScene shows a scene even if the phone is fine. "" goes back to
+// automatic switching. Picking a scene before going live makes the stream
+// start with it.
+func (s *Supervisor) PickScene(ctx context.Context, id string) error {
+	if id != "" && s.scene(id) == nil {
+		return fmt.Errorf("%w %q", errUnknownScene, id)
+	}
 	return s.do(ctx, func() {
-		if s.forceFallback != on {
-			s.log.Info("forced fallback changed", "enabled", on)
-			s.forceFallback = on
+		if s.pickedScene != id {
+			s.log.Info("scene picked", "scene", id, "automatic", id == "")
+			s.pickedScene = id
 		}
 	})
 }
