@@ -103,21 +103,21 @@ func startFFmpeg(cfg Config, mode Mode, scene *PreparedScene, log *slog.Logger) 
 
 	if err := p.cmd.Start(); err != nil {
 		if pipeR != nil {
-			pipeR.Close()
-			p.pipeW.Close()
+			_ = pipeR.Close()
+			_ = p.pipeW.Close()
 		}
-		stderrW.Close()
+		_ = stderrW.Close()
 		return nil, fmt.Errorf("start ffmpeg: %w", err)
 	}
 	if pipeR != nil {
-		pipeR.Close() // the child owns the read end now
+		_ = pipeR.Close() // the child owns the read end now
 		go p.writeLoop()
 	}
 
 	go p.logStderr(stderrR)
 	go func() {
 		p.exitErr = p.cmd.Wait()
-		stderrW.Close()
+		_ = stderrW.Close()
 		p.closeInput()
 		close(p.done)
 	}()
@@ -162,7 +162,7 @@ func (p *ffmpegProc) writeLoop() {
 func (p *ffmpegProc) closeInput() {
 	p.closeOnce.Do(func() {
 		if p.pipeW != nil {
-			p.pipeW.Close()
+			_ = p.pipeW.Close()
 		}
 	})
 }
