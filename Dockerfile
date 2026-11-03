@@ -10,7 +10,7 @@ COPY *.go ./
 COPY web ./web
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/srt-twitch-relay .
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ffmpeg \
     && adduser -D -H -u 10001 relay \
     && mkdir /data && chown relay /data
