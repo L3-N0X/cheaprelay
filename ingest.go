@@ -152,7 +152,7 @@ func (in *Ingest) serve(conn srt.Conn, streamID, remote string) {
 	log.Info("SRT publisher connected", "stream_id", streamID)
 	if old != nil {
 		log.Info("replacing previous SRT connection", "old_session", old.id)
-		old.conn.Close()
+		_ = old.conn.Close()
 	}
 
 	buf := make([]byte, 2048)
@@ -167,7 +167,7 @@ func (in *Ingest) serve(conn srt.Conn, streamID, remote string) {
 			in.onData(s, buf[:n], log)
 		}
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	in.mu.Lock()
 	if in.sess == s {

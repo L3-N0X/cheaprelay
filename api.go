@@ -92,7 +92,7 @@ func (a *API) Handler() http.Handler {
 		files.ServeHTTP(w, r)
 	}))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok\n"))
+		_, _ = w.Write([]byte("ok\n"))
 	})
 
 	mux.Handle("GET /api/status", a.auth(http.HandlerFunc(a.handleStatus)))
@@ -191,7 +191,7 @@ func (a *API) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
-	w.Write(f.JPEG)
+	_, _ = w.Write(f.JPEG)
 }
 
 func (a *API) handleLogs(w http.ResponseWriter, r *http.Request) {

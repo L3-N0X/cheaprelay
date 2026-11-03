@@ -51,7 +51,7 @@ func checkGOPCache(t *testing.T, dir string, data []byte) {
 	for i := 0; i+tsPacketSize <= len(data); i += tsPacketSize {
 		before := len(c.gop)
 		c.push(data[i : i+tsPacketSize])
-		if c.gop != nil && len(c.gop) == tsPacketSize && before != 0 {
+		if len(c.gop) == tsPacketSize && before != 0 {
 			keyframes++
 		}
 	}
